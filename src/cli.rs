@@ -1,3 +1,112 @@
 //! Command-line surface: clap definitions, command parsing, table/JSON
 //! rendering, and the daemon IPC client (with direct-mode behavior when the
 //! daemon is absent). The CLI never drives the scheduler or executor directly.
+//!
+//! This is the command *skeleton*: the v1 group/subcommand tree from
+//! `periodic-cli-design`, with every command stubbed. Per-command flags, the
+//! `--format` JSON contract, and norn's wholesale help renderer arrive in later
+//! phases as the commands that consume them land.
+
+use clap::{Parser, Subcommand};
+
+#[derive(Debug, Parser)]
+#[command(name = "periodic", version, propagate_version = true)]
+#[command(
+    about = "User-space recurring job scheduler",
+    arg_required_else_help = true
+)]
+pub(crate) struct Cli {
+    #[arg(
+        long,
+        global = true,
+        help_heading = "Global options",
+        help = "Include full diagnostic detail in output"
+    )]
+    pub(crate) verbose: bool,
+
+    #[arg(
+        long,
+        global = true,
+        help_heading = "Global options",
+        help = "Suppress non-essential output"
+    )]
+    pub(crate) quiet: bool,
+
+    #[command(subcommand)]
+    pub(crate) command: Command,
+}
+
+/// Top-level v1 command groups (see `periodic-cli-design`).
+#[derive(Debug, Subcommand)]
+pub(crate) enum Command {
+    /// Manage the periodic daemon.
+    #[command(subcommand)]
+    Daemon(DaemonCommand),
+    /// Manage scheduled jobs.
+    #[command(subcommand)]
+    Jobs(JobsCommand),
+    /// Show job run logs.
+    Logs,
+    /// Validate the configuration without applying it.
+    Validate,
+    /// Reload the configuration (validated).
+    Reload,
+    /// Diagnose daemon, config, and runtime health.
+    Doctor,
+    /// Generate shell completions.
+    Completion,
+}
+
+/// `periodic daemon …`
+#[derive(Debug, Subcommand)]
+pub(crate) enum DaemonCommand {
+    /// Start the daemon.
+    Start,
+    /// Stop the daemon.
+    Stop,
+    /// Show daemon status.
+    Status,
+}
+
+/// `periodic jobs …`
+#[derive(Debug, Subcommand)]
+pub(crate) enum JobsCommand {
+    /// Add a job.
+    Add,
+    /// List jobs.
+    List,
+    /// Show one job's status.
+    Status,
+    /// Run a job now.
+    Run,
+    /// Pause a job.
+    Pause,
+    /// Resume a paused job.
+    Resume,
+    /// Remove a job.
+    Remove,
+    /// Edit a job.
+    Edit,
+    /// Show a job's run history.
+    History,
+}
+
+/// Parse the command line. Thin wrapper so `main` stays declarative.
+pub(crate) fn parse() -> Cli {
+    Cli::parse()
+}
+
+/// Route a parsed command to its handler. Every command is stubbed until the
+/// phase that implements it lands.
+pub(crate) fn dispatch(cli: Cli) -> anyhow::Result<()> {
+    let command = match cli.command {
+        Command::Daemon(_) => "daemon",
+        Command::Jobs(_) => "jobs",
+        Command::Logs => "logs",
+        Command::Validate => "validate",
+        Command::Reload => "reload",
+        Command::Doctor => "doctor",
+        Command::Completion => "completion",
+    };
+    anyhow::bail!("`periodic {command}` is not implemented yet");
+}
