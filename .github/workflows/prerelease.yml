@@ -1,14 +1,19 @@
 name: Prerelease tagger
 
-# Every build-affecting push to main auto-tags a vX.Y.Z-next.N prerelease, which
-# the dist release workflow then builds + publishes (release.yml already flags
-# `-` (prerelease) tags with --prerelease). The path filter is the changeset
-# analyzer: a docs-only merge doesn't match, so no prerelease is produced.
+# Every build-affecting push to main rolls a single prerelease tag matching the
+# Cargo.toml version (e.g. v0.1.0-next), which the dist release workflow then
+# builds + publishes (release.yml flags `-` (prerelease) tags with --prerelease).
+#
+# cargo-dist requires the git tag's version to equal the Cargo.toml version, so
+# the tag carries no counter — it is *rolled* (deleted + recreated at the new
+# HEAD) on each merge. `self-update --next` always resolves to this latest
+# prerelease. The path filter is the changeset analyzer: a docs-only merge
+# doesn't match, so no prerelease is produced.
 #
 # The tag is pushed with a PAT (secrets.RELEASE_TAG_PAT, needs `contents: write`)
 # rather than the default GITHUB_TOKEN: a GITHUB_TOKEN-pushed tag does NOT trigger
 # release.yml's `push: tags` (GitHub's anti-recursion rule), but a PAT-pushed tag
-# does. A deploy key works equally well if you prefer.
+# does. The same PAT authorizes the `gh release delete` below.
 on:
   push:
     branches: [main]
@@ -21,7 +26,7 @@ on:
       - ".github/workflows/release.yml"
       - ".github/workflows/prerelease.yml"
 
-# Serialize so two quick merges can't race on "highest + 1".
+# Serialize so two quick merges can't race on the rolling tag.
 concurrency:
   group: prerelease-tagger
   cancel-in-progress: false
@@ -32,6 +37,8 @@ permissions:
 jobs:
   tag:
     runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.RELEASE_TAG_PAT }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -39,7 +46,7 @@ jobs:
           fetch-tags: true
           token: ${{ secrets.RELEASE_TAG_PAT }}
 
-      - name: Compute and push the prerelease tag
+      - name: Roll the prerelease tag
         run: |
           set -euo pipefail
           # Annotated tags need a committer identity; the runner has none.
@@ -48,21 +55,16 @@ jobs:
           ver=$(grep -m1 '^version = ' Cargo.toml | sed -E 's/^version = "([^"]+)".*/\1/')
           case "$ver" in
             *-next)
-              # Counter = highest existing vX.Y.Z-next.N for this base, + 1.
-              # Only real prerelease builds create tags, so noop merges never
-              # advance it; robust to pruning (we keep the max) and history shape.
-              max=0
-              for t in $(git tag -l "v${ver}.*"); do
-                n="${t#v${ver}.}"
-                case "$n" in (*[!0-9]*) continue ;; esac
-                if [ "$n" -gt "$max" ]; then max="$n"; fi
-              done
-              n=$((max + 1))
-              tag="v${ver}.${n}"
-              echo "tagging $tag"
-              git tag -a "$tag" -m "Prerelease $tag"
+              tag="v${ver}"
+              # Remove the prior rolling prerelease so the dist release workflow's
+              # `gh release create` doesn't collide. --cleanup-tag drops the tag too;
+              # the explicit ref delete covers a tag with no release object.
+              gh release delete "$tag" --yes --cleanup-tag 2>/dev/null || true
+              git push origin ":refs/tags/${tag}" 2>/dev/null || true
+              # Recreate at the merge commit; the PAT push triggers release.yml.
+              git tag -a "$tag" -m "Rolling prerelease $tag"
               git push origin "$tag"
-              echo "pushed $tag — release.yml builds + publishes the prerelease"
+              echo "rolled $tag to $(git rev-parse --short HEAD)"
               ;;
             *)
               echo "Cargo.toml version $ver is not a -next dev version; no prerelease."

@@ -13,17 +13,19 @@ just verify      # cargo fmt --check + clippy -D warnings + tests (all --locked)
 
 periodic uses a **progressive prerelease channel**. The version in `Cargo.toml`
 is *always* a `-next` development version during normal work (e.g. `0.1.0-next`),
-and every build-affecting merge to `main` auto-publishes an incrementing
-`vX.Y.Z-next.N` prerelease (see `.github/workflows/prerelease.yml`). Install or
-update to the latest prerelease with `periodic self-update --next`.
+and every build-affecting merge to `main` rolls a single `vX.Y.Z-next` prerelease
+tag — deleted and recreated at the new `main` so it always reflects the latest
+build (see `.github/workflows/prerelease.yml`). cargo-dist requires the tag
+version to equal the `Cargo.toml` version, so the tag carries no counter. Install
+or update to it with `periodic self-update --next`.
 
 While periodic is pre-1.0, each phase of work is a minor version (`0.1`, `0.2`, …)
 and minor versions may carry breaking changes.
 
 ### The cycle
 
-1. **Develop** on `X.Y.Z-next`. Build-affecting merges to `main` publish
-   `vX.Y.Z-next.1`, `.2`, … as GitHub prereleases.
+1. **Develop** on `X.Y.Z-next`. Build-affecting merges to `main` roll the
+   `vX.Y.Z-next` prerelease to the latest build.
 2. **Cut a clean release** when the increment is done:
    - Promote `CHANGELOG.md`: rename `## [Unreleased]` to `## vX.Y.Z - YYYY-MM-DD`,
      and add a fresh `## [Unreleased]` above it (see the `changelog` skill).

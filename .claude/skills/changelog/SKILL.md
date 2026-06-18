@@ -9,7 +9,7 @@ description: Hard-and-fast rule and conventions for maintaining CHANGELOG.md in 
 
 **Every user-visible change must appear in `CHANGELOG.md` under `## [Unreleased]` BEFORE the change lands on `main`.** No exceptions. A commit that adds/changes/removes user-visible behavior without a CHANGELOG entry is incomplete — add the entry before merging.
 
-The rule is enforced at *change time*, not *release time*. periodic publishes a `vX.Y.Z-next.N` prerelease on every build-affecting merge to `main`, so a user-visible change reaches operators (via `periodic self-update --next`) the moment it merges — long before a clean `0.x.0` is cut. By the time you cut a release, `## [Unreleased]` should already be complete; promoting it is a rename, not an authoring pass.
+The rule is enforced at *change time*, not *release time*. periodic rolls a `vX.Y.Z-next` prerelease on every build-affecting merge to `main`, so a user-visible change reaches operators (via `periodic self-update --next`) the moment it merges — long before a clean `0.x.0` is cut. By the time you cut a release, `## [Unreleased]` should already be complete; promoting it is a rename, not an authoring pass.
 
 This applies whether the change ships via a direct commit to `main`, a PR merge, or a squash-merge from a feature branch.
 
