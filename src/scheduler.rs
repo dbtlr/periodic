@@ -7,20 +7,22 @@ use std::str::FromStr;
 use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, TimeZone, Timelike, Weekday};
 use chrono_tz::Tz;
 
+use crate::config::NormalizedSchedule;
+
 /// Resolve an optional IANA timezone name to a concrete [`Tz`].
 ///
-/// `None` means the job did not specify a zone, so the system local zone is
-/// used. Names are already validated upstream (decision 0001 / 0.2 validation),
-/// so an unparseable name or undetectable local zone falls back to UTC purely
-/// defensively — the engine never panics on a bad zone.
-#[allow(dead_code)] // consumed by the per-kind computation tasks (PDC-42..44)
+/// `None` (or the validated `"local"` sentinel) means the job did not pin a
+/// zone, so the system local zone is used. Names are already validated upstream
+/// (decision 0001 / 0.2 validation), so an unparseable name or undetectable
+/// local zone falls back to UTC purely defensively — the engine never panics on
+/// a bad zone.
 pub(crate) fn resolve_timezone(name: Option<&str>) -> Tz {
     match name {
-        Some(tz) => Tz::from_str(tz).unwrap_or(Tz::UTC),
-        None => iana_time_zone::get_timezone()
+        None | Some("local") => iana_time_zone::get_timezone()
             .ok()
             .and_then(|local| Tz::from_str(&local).ok())
             .unwrap_or(Tz::UTC),
+        Some(tz) => Tz::from_str(tz).unwrap_or(Tz::UTC),
     }
 }
 
@@ -242,6 +244,55 @@ pub(crate) fn next_cron(expression: &str, tz: Tz, after: DateTime<Tz>) -> Option
         .ok()
 }
 
+/// The schedule-computation engine: the next [`Occurrence`] for `schedule`
+/// strictly after `after`, or `None` when none exists (only cron can be empty).
+///
+/// `default_tz` is the job's resolved timezone — it drives the aligned kinds
+/// (which carry no zone of their own) and is the fallback for calendar/cron
+/// schedules that don't pin one. This is the single entry point the scheduler
+/// loop (phase 0.6) calls; everything above is an internal per-kind helper.
+#[allow(dead_code)] // consumed by the scheduler loop (PDC-8 / phase 0.6)
+pub(crate) fn next_occurrence(
+    job_id: &str,
+    schedule: &NormalizedSchedule,
+    default_tz: Tz,
+    after: DateTime<Tz>,
+) -> Option<Occurrence> {
+    let pinned_tz = |tz: &Option<String>| {
+        tz.as_deref()
+            .map_or(default_tz, |t| resolve_timezone(Some(t)))
+    };
+
+    let (instant, kind) = match schedule {
+        NormalizedSchedule::MinuteAligned { every_minutes } => (
+            next_minute_aligned(*every_minutes, after.with_timezone(&default_tz)),
+            ScheduleKind::Minute,
+        ),
+        NormalizedSchedule::HourAligned { every_hours } => (
+            next_hour_aligned(*every_hours, after.with_timezone(&default_tz)),
+            ScheduleKind::Hour,
+        ),
+        NormalizedSchedule::Calendar {
+            days,
+            at,
+            timezone,
+            on_day,
+            last_day,
+        } => (
+            next_calendar(days, at, pinned_tz(timezone), *on_day, *last_day, after),
+            ScheduleKind::Calendar,
+        ),
+        NormalizedSchedule::Cron {
+            expression,
+            timezone,
+        } => (
+            next_cron(expression, pinned_tz(timezone), after)?,
+            ScheduleKind::Cron,
+        ),
+    };
+    Some(Occurrence::new(job_id, kind, instant))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -274,6 +325,12 @@ mod tests {
             resolve_timezone(Some("America/New_York")),
             Tz::America__New_York
         );
+    }
+
+    #[test]
+    fn resolve_timezone_treats_local_sentinel_as_system_zone() {
+        // "local" is the validated sentinel for the system zone (same as None).
+        assert_eq!(resolve_timezone(Some("local")), resolve_timezone(None));
     }
 
     #[test]
@@ -504,5 +561,108 @@ mod tests {
             next_cron("not a cron", Tz::UTC, utc(2026, 1, 15, 8, 0)),
             None
         );
+    }
+
+    // ── engine API: next_occurrence dispatch ──────────────────────────────────
+
+    fn calendar_daily_at(at: &str) -> NormalizedSchedule {
+        NormalizedSchedule::Calendar {
+            days: vec!["day".to_string()],
+            at: at.to_string(),
+            timezone: None,
+            on_day: None,
+            last_day: false,
+        }
+    }
+
+    /// A representative schedule of every kind, for property-style coverage.
+    fn every_kind() -> Vec<NormalizedSchedule> {
+        vec![
+            NormalizedSchedule::MinuteAligned { every_minutes: 15 },
+            NormalizedSchedule::HourAligned { every_hours: 6 },
+            calendar_daily_at("09:00"),
+            NormalizedSchedule::Calendar {
+                days: vec!["month".to_string()],
+                at: "09:00".to_string(),
+                timezone: None,
+                on_day: Some(1),
+                last_day: false,
+            },
+            NormalizedSchedule::Cron {
+                expression: "0 9 * * *".to_string(),
+                timezone: None,
+            },
+        ]
+    }
+
+    /// The kind label embedded in an occurrence key (`job:KIND:instant`).
+    fn key_kind(occ: &Occurrence) -> String {
+        occ.key.split(':').nth(1).unwrap().to_string()
+    }
+
+    #[test]
+    fn dispatch_builds_an_occurrence_with_the_kind_in_the_key() {
+        let occ = next_occurrence(
+            "backup",
+            &calendar_daily_at("09:00"),
+            Tz::UTC,
+            utc(2026, 1, 15, 8, 0),
+        )
+        .unwrap();
+        assert_eq!(occ.scheduled_for, utc(2026, 1, 15, 9, 0));
+        assert_eq!(occ.key, "backup:calendar:2026-01-15T09:00:00+00:00");
+    }
+
+    #[test]
+    fn dispatch_routes_each_kind_to_its_labelled_key() {
+        let after = utc(2026, 1, 15, 8, 0);
+        let kinds: Vec<String> = every_kind()
+            .iter()
+            .map(|s| key_kind(&next_occurrence("j", s, Tz::UTC, after).unwrap()))
+            .collect();
+        assert_eq!(kinds, ["minute", "hour", "calendar", "calendar", "cron"]);
+    }
+
+    #[test]
+    fn dispatch_aligned_uses_the_default_timezone() {
+        // Hour-aligned has no embedded zone; default_tz drives wall-clock.
+        // 06:30 EST -> next 6h boundary 12:00 EST (-05:00).
+        let after = resolve_wall_clock(naive(2026, 1, 15, 6, 30), Tz::America__New_York);
+        let occ = next_occurrence(
+            "j",
+            &NormalizedSchedule::HourAligned { every_hours: 6 },
+            Tz::America__New_York,
+            after,
+        )
+        .unwrap();
+        assert_eq!(occ.scheduled_for.to_rfc3339(), "2026-01-15T12:00:00-05:00");
+    }
+
+    #[test]
+    fn property_every_kind_is_total_and_strictly_after() {
+        let after = utc(2026, 1, 15, 8, 0);
+        for schedule in every_kind() {
+            let occ = next_occurrence("j", &schedule, Tz::UTC, after)
+                .unwrap_or_else(|| panic!("no occurrence for {schedule:?}"));
+            assert!(
+                occ.scheduled_for > after,
+                "not strictly after for {schedule:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn property_stepping_advances_monotonically() {
+        // Feeding each occurrence back as `after` yields a strictly later one,
+        // so the engine can drive an unbounded forward iteration.
+        for schedule in every_kind() {
+            let mut cursor = utc(2026, 1, 15, 8, 0);
+            for _ in 0..5 {
+                let occ = next_occurrence("j", &schedule, Tz::UTC, cursor)
+                    .unwrap_or_else(|| panic!("no occurrence for {schedule:?}"));
+                assert!(occ.scheduled_for > cursor, "stalled for {schedule:?}");
+                cursor = occ.scheduled_for;
+            }
+        }
     }
 }
