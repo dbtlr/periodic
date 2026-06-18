@@ -4,7 +4,7 @@
 
 use std::str::FromStr;
 
-use chrono::{DateTime, NaiveDateTime, TimeZone, Timelike};
+use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, TimeZone, Timelike, Weekday};
 use chrono_tz::Tz;
 
 /// Resolve an optional IANA timezone name to a concrete [`Tz`].
@@ -124,10 +124,115 @@ pub(crate) fn next_hour_aligned(every_hours: u32, after: DateTime<Tz>) -> DateTi
     resolve_wall_clock(boundary, tz)
 }
 
+/// Parse a validated `"HH:MM"` into `(hour, minute)`, defaulting to midnight if
+/// it is somehow malformed (validation already rejects bad values; the engine
+/// stays total regardless).
+fn parse_hhmm(at: &str) -> (u32, u32) {
+    at.split_once(':')
+        .and_then(|(h, m)| Some((h.parse().ok()?, m.parse().ok()?)))
+        .unwrap_or((0, 0))
+}
+
+/// Map a weekday name to [`Weekday`]. Returns `None` for non-weekday tokens
+/// (`"day"`, `"weekday"`, `"month"`), which are handled by the caller.
+fn weekday_from_name(name: &str) -> Option<Weekday> {
+    Some(match name {
+        "monday" => Weekday::Mon,
+        "tuesday" => Weekday::Tue,
+        "wednesday" => Weekday::Wed,
+        "thursday" => Weekday::Thu,
+        "friday" => Weekday::Fri,
+        "saturday" => Weekday::Sat,
+        "sunday" => Weekday::Sun,
+        _ => return None,
+    })
+}
+
+/// Whether a calendar `days` set fires on `weekday`. `"day"` means every day;
+/// `"weekday"` means Monday–Friday; specific names match themselves.
+fn calendar_fires_on(days: &[String], weekday: Weekday) -> bool {
+    days.iter().any(|d| match d.as_str() {
+        "day" => true,
+        "weekday" => !matches!(weekday, Weekday::Sat | Weekday::Sun),
+        name => weekday_from_name(name) == Some(weekday),
+    })
+}
+
+/// Last calendar day (28–31) of the given month.
+fn last_day_of_month(year: i32, month: u32) -> u32 {
+    let (ny, nm) = if month == 12 {
+        (year + 1, 1)
+    } else {
+        (year, month + 1)
+    };
+    // First of next month minus one day is the last day of this month.
+    NaiveDate::from_ymd_opt(ny, nm, 1)
+        .unwrap()
+        .pred_opt()
+        .unwrap()
+        .day()
+}
+
+/// Next calendar firing strictly after `after`, applying decision 0001
+/// (wall-clock in the schedule's `tz`) and decision 0005 (DST resolution).
+///
+/// A `days` set containing `"month"` is a monthly schedule (fires on `on_day`,
+/// or the last day when `last_day`); otherwise `days` is a weekday set
+/// (`"day"`, `"weekday"`, or named weekdays). The engine is total: every
+/// schedule yields a next occurrence.
+#[allow(dead_code)] // consumed by the engine API dispatch (PDC-45)
+pub(crate) fn next_calendar(
+    days: &[String],
+    at: &str,
+    tz: Tz,
+    on_day: Option<i64>,
+    last_day: bool,
+    after: DateTime<Tz>,
+) -> DateTime<Tz> {
+    let (hour, minute) = parse_hhmm(at);
+    let local = after.with_timezone(&tz);
+
+    if days.iter().any(|d| d == "month") {
+        // Monthly: walk forward month by month until the target day exists and
+        // its instant is strictly after `after`.
+        let (mut year, mut month) = (local.year(), local.month());
+        loop {
+            let day = if last_day {
+                last_day_of_month(year, month)
+            } else {
+                on_day.filter(|d| (1..=31).contains(d)).unwrap_or(1) as u32
+            };
+            if let Some(date) = NaiveDate::from_ymd_opt(year, month, day) {
+                let candidate = resolve_wall_clock(date.and_hms_opt(hour, minute, 0).unwrap(), tz);
+                if candidate > after {
+                    return candidate;
+                }
+            }
+            (year, month) = if month == 12 {
+                (year + 1, 1)
+            } else {
+                (year, month + 1)
+            };
+        }
+    }
+
+    // Weekday set: walk forward day by day to the next matching weekday whose
+    // instant is strictly after `after`.
+    let mut date = local.date_naive();
+    loop {
+        if calendar_fires_on(days, date.weekday()) {
+            let candidate = resolve_wall_clock(date.and_hms_opt(hour, minute, 0).unwrap(), tz);
+            if candidate > after {
+                return candidate;
+            }
+        }
+        date = date.succ_opt().unwrap();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::NaiveDate;
     use chrono_tz::Tz;
 
     fn naive(y: i32, m: u32, d: u32, h: u32, min: u32) -> chrono::NaiveDateTime {
@@ -250,5 +355,99 @@ mod tests {
             next_hour_aligned(6, utc(2026, 1, 15, 18, 30)),
             utc(2026, 1, 16, 0, 0)
         );
+    }
+
+    // ── calendar ────────────────────────────────────────────────────────────
+
+    fn cal(
+        days: &[&str],
+        at: &str,
+        on_day: Option<i64>,
+        last_day: bool,
+        after: DateTime<Tz>,
+    ) -> DateTime<Tz> {
+        let days: Vec<String> = days.iter().map(|s| s.to_string()).collect();
+        next_calendar(&days, at, Tz::UTC, on_day, last_day, after)
+    }
+
+    #[test]
+    fn calendar_daily_fires_at_the_time_today_then_tomorrow() {
+        assert_eq!(
+            cal(&["day"], "09:00", None, false, utc(2026, 1, 15, 8, 0)),
+            utc(2026, 1, 15, 9, 0)
+        );
+        // Strict: at the boundary it rolls to tomorrow.
+        assert_eq!(
+            cal(&["day"], "09:00", None, false, utc(2026, 1, 15, 9, 0)),
+            utc(2026, 1, 16, 9, 0)
+        );
+    }
+
+    #[test]
+    fn calendar_single_weekday_jumps_to_that_weekday() {
+        // Wed 2026-01-14 -> next Friday is 2026-01-16.
+        assert_eq!(
+            cal(&["friday"], "17:00", None, false, utc(2026, 1, 14, 12, 0)),
+            utc(2026, 1, 16, 17, 0)
+        );
+    }
+
+    #[test]
+    fn calendar_multiple_weekdays_pick_the_nearest() {
+        // Thu 2026-01-15 10:00, set {Mon,Wed,Fri} -> Fri 2026-01-16 09:00.
+        assert_eq!(
+            cal(
+                &["monday", "wednesday", "friday"],
+                "09:00",
+                None,
+                false,
+                utc(2026, 1, 15, 10, 0)
+            ),
+            utc(2026, 1, 16, 9, 0)
+        );
+    }
+
+    #[test]
+    fn calendar_weekday_token_skips_the_weekend() {
+        // Fri 2026-01-16 18:00 -> Mon 2026-01-19 09:00.
+        assert_eq!(
+            cal(&["weekday"], "09:00", None, false, utc(2026, 1, 16, 18, 0)),
+            utc(2026, 1, 19, 9, 0)
+        );
+    }
+
+    #[test]
+    fn calendar_monthly_on_day_fires_next_month() {
+        assert_eq!(
+            cal(&["month"], "09:00", Some(1), false, utc(2026, 1, 15, 0, 0)),
+            utc(2026, 2, 1, 9, 0)
+        );
+    }
+
+    #[test]
+    fn calendar_monthly_last_day_fires_end_of_month() {
+        assert_eq!(
+            cal(&["month"], "09:00", None, true, utc(2026, 1, 15, 0, 0)),
+            utc(2026, 1, 31, 9, 0)
+        );
+    }
+
+    #[test]
+    fn calendar_monthly_on_day_31_skips_months_without_it() {
+        // After 2026-01-31, on_day=31: Feb and Apr lack a 31st -> next is Mar 31.
+        assert_eq!(
+            cal(&["month"], "09:00", Some(31), false, utc(2026, 2, 1, 0, 0)),
+            utc(2026, 3, 31, 9, 0)
+        );
+    }
+
+    #[test]
+    fn calendar_daily_advances_through_a_dst_gap_in_its_own_zone() {
+        // Daily 02:30 in New York on the spring-forward day -> 03:00 EDT
+        // (decision 0005), proving the schedule's tz drives wall-clock + DST.
+        let days = vec!["day".to_string()];
+        let after = resolve_wall_clock(naive(2026, 3, 8, 0, 0), Tz::America__New_York);
+        let next = next_calendar(&days, "02:30", Tz::America__New_York, None, false, after);
+        assert_eq!(next.to_rfc3339(), "2026-03-08T03:00:00-04:00");
     }
 }
