@@ -31,7 +31,14 @@ jobs:
               exit 0
               ;;
           esac
-          if git rev-parse "v${ver}" >/dev/null 2>&1; then
+          if git rev-parse -q --verify "refs/tags/v${ver}" >/dev/null 2>&1; then
+            # Race-free: a tag pointing at HEAD is the release cut happening now
+            # (the commit + tag can arrive together); only a tag on an *older*
+            # commit means the version shipped and the next cycle wasn't opened.
+            if [ "$(git rev-parse "v${ver}^{commit}")" = "$(git rev-parse "HEAD^{commit}")" ]; then
+              echo "v${ver} points at HEAD — this is the release commit; ok"
+              exit 0
+            fi
             next=$(echo "$ver" | awk -F. '{printf "%d.%d.0-next", $1, $2 + 1}')
             echo "::error::Cargo.toml is ${ver}, already released as v${ver} — open the next development cycle (bump to ${next}) before merging build-affecting changes."
             exit 1
