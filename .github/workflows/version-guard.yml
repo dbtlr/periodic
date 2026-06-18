@@ -1,0 +1,39 @@
+name: Version guard
+
+# Fail fast if Cargo.toml carries a clean (non-prerelease) version whose tag
+# already exists — i.e. a release happened but nobody opened the next -next
+# cycle, so prereleases would silently stop. Allowed: the release commit itself
+# (its tag isn't pushed yet) and any -next / prerelease version.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Assert the release / next-cycle invariant
+        run: |
+          set -euo pipefail
+          ver=$(grep -m1 '^version = ' Cargo.toml | sed -E 's/^version = "([^"]+)".*/\1/')
+          case "$ver" in
+            *-*)
+              echo "prerelease version $ver — ok"
+              exit 0
+              ;;
+          esac
+          if git rev-parse "v${ver}" >/dev/null 2>&1; then
+            next=$(echo "$ver" | awk -F. '{printf "%d.%d.0-next", $1, $2 + 1}')
+            echo "::error::Cargo.toml is ${ver}, already released as v${ver} — open the next development cycle (bump to ${next}) before merging build-affecting changes."
+            exit 1
+          fi
+          echo "clean version ${ver} with no existing tag — this is the release commit; ok"
