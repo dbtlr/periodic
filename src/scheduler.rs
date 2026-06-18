@@ -230,6 +230,18 @@ pub(crate) fn next_calendar(
     }
 }
 
+/// Next cron firing strictly after `after`, evaluated in `tz`.
+///
+/// Returns `None` if the expression cannot be parsed (defensive — validation
+/// already rejects bad expressions) or has no future occurrence. croner owns
+/// cron's own DST semantics, so the resolver above is not involved here.
+#[allow(dead_code)] // consumed by the engine API dispatch (PDC-45)
+pub(crate) fn next_cron(expression: &str, tz: Tz, after: DateTime<Tz>) -> Option<DateTime<Tz>> {
+    let cron = croner::Cron::from_str(expression).ok()?;
+    cron.find_next_occurrence(&after.with_timezone(&tz), false)
+        .ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -449,5 +461,48 @@ mod tests {
         let after = resolve_wall_clock(naive(2026, 3, 8, 0, 0), Tz::America__New_York);
         let next = next_calendar(&days, "02:30", Tz::America__New_York, None, false, after);
         assert_eq!(next.to_rfc3339(), "2026-03-08T03:00:00-04:00");
+    }
+
+    // ── cron ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn cron_daily_fires_at_the_pattern_time() {
+        assert_eq!(
+            next_cron("0 9 * * *", Tz::UTC, utc(2026, 1, 15, 8, 0)),
+            Some(utc(2026, 1, 15, 9, 0))
+        );
+    }
+
+    #[test]
+    fn cron_is_strict_after_a_matching_instant() {
+        assert_eq!(
+            next_cron("0 9 * * *", Tz::UTC, utc(2026, 1, 15, 9, 0)),
+            Some(utc(2026, 1, 16, 9, 0))
+        );
+    }
+
+    #[test]
+    fn cron_honors_the_schedule_timezone() {
+        // 08:00 EST -> next "0 9 * * *" fires at 09:00 EST (-05:00).
+        let after = resolve_wall_clock(naive(2026, 1, 15, 8, 0), Tz::America__New_York);
+        let next = next_cron("0 9 * * *", Tz::America__New_York, after).unwrap();
+        assert_eq!(next.to_rfc3339(), "2026-01-15T09:00:00-05:00");
+    }
+
+    #[test]
+    fn cron_weekday_range_skips_the_weekend() {
+        // Fri 2026-01-16 18:00, "0 9 * * 1-5" -> Mon 2026-01-19 09:00.
+        assert_eq!(
+            next_cron("0 9 * * 1-5", Tz::UTC, utc(2026, 1, 16, 18, 0)),
+            Some(utc(2026, 1, 19, 9, 0))
+        );
+    }
+
+    #[test]
+    fn cron_unparseable_expression_yields_none() {
+        assert_eq!(
+            next_cron("not a cron", Tz::UTC, utc(2026, 1, 15, 8, 0)),
+            None
+        );
     }
 }
