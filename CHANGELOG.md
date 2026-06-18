@@ -7,6 +7,12 @@ is pre-1.0, minor versions (`0.x`) may carry breaking changes.
 
 ## [Unreleased]
 
+## v0.2.0 - 2026-06-18
+
+The `0.2` increment — config and validation. periodic's first user-facing
+surface: it now parses and strictly validates the YAML desired-state config and
+opens the frozen `--format json` agent contract (decision 0002).
+
 ### Added
 
 - `periodic validate [PATH] [--format human|json]` — parse and strictly validate
