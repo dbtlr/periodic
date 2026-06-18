@@ -7,3 +7,7 @@ repository = "https://github.com/dbtlr/periodic"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
+anyhow = "1.0.102"
+thiserror = "2.0.18"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
