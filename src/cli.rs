@@ -7,6 +7,8 @@
 //! `--format` JSON contract, and norn's wholesale help renderer arrive in later
 //! phases as the commands that consume them land.
 
+use std::path::PathBuf;
+
 use clap::{Args, Parser, Subcommand};
 
 #[derive(Debug, Parser)]
@@ -48,7 +50,7 @@ pub(crate) enum Command {
     /// Show job run logs.
     Logs,
     /// Validate the configuration without applying it.
-    Validate,
+    Validate(ValidateArgs),
     /// Reload the configuration (validated).
     Reload,
     /// Diagnose daemon, config, and runtime health.
@@ -102,6 +104,30 @@ pub(crate) enum JobsCommand {
     Edit,
     /// Show a job's run history.
     History,
+}
+
+/// Arguments for `periodic validate`.
+#[derive(Debug, Args)]
+pub(crate) struct ValidateArgs {
+    /// Config file to validate (default: ~/.config/periodic/periodic.config.yaml).
+    pub(crate) path: Option<PathBuf>,
+    /// Output format.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+    pub(crate) format: OutputFormat,
+}
+
+/// Output format for `periodic validate`.
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+pub(crate) enum OutputFormat {
+    Human,
+    Json,
+}
+
+pub(crate) fn default_config_path() -> PathBuf {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_default();
+    home.join(".config/periodic/periodic.config.yaml")
 }
 
 /// Parse the command line. Thin wrapper so `main` stays declarative.

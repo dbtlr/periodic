@@ -1,0 +1,7 @@
+version: 1
+jobs:
+  - id: backup
+    schedule:
+      every: 15m
+    execution:
+      command: echo "backup"

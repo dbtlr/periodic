@@ -1,6 +1,7 @@
 mod cli;
 mod config;
 mod daemon;
+mod diagnostics;
 mod doctor;
 mod error;
 mod events;
@@ -13,33 +14,78 @@ mod state;
 mod util;
 mod validation;
 
-use anyhow::Context;
+use std::process::ExitCode;
 
-use cli::Command;
-
-fn main() -> anyhow::Result<()> {
+fn main() -> ExitCode {
     let cli = cli::parse();
-    init_logging(cli.verbose, cli.quiet).context("initializing periodic")?;
+    if let Err(e) = init_logging(cli.verbose, cli.quiet) {
+        eprintln!("error: {e:#}");
+        return ExitCode::from(2);
+    }
     tracing::debug!(version = env!("CARGO_PKG_VERSION"), "periodic starting");
-    dispatch(cli)
+    match dispatch(cli) {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("error: {e:#}");
+            ExitCode::from(2)
+        }
+    }
 }
 
 /// Route a parsed command to its handler. Commands without an implementation yet
 /// report so explicitly.
-fn dispatch(cli: cli::Cli) -> anyhow::Result<()> {
+fn dispatch(cli: cli::Cli) -> anyhow::Result<ExitCode> {
+    use cli::Command;
     match cli.command {
-        Command::SelfUpdate(args) => self_update::run(args.next, args.tag),
+        Command::Validate(args) => Ok(run_validate(&args)),
+        Command::SelfUpdate(args) => {
+            self_update::run(args.next, args.tag).map(|()| ExitCode::SUCCESS)
+        }
         Command::Daemon(_) => unimplemented("daemon"),
         Command::Jobs(_) => unimplemented("jobs"),
         Command::Logs => unimplemented("logs"),
-        Command::Validate => unimplemented("validate"),
         Command::Reload => unimplemented("reload"),
         Command::Doctor => unimplemented("doctor"),
         Command::Completion => unimplemented("completion"),
     }
 }
 
-fn unimplemented(name: &str) -> anyhow::Result<()> {
+/// Orchestrate `periodic validate`: read → parse → validate → render → exit code.
+fn run_validate(args: &cli::ValidateArgs) -> ExitCode {
+    let path = args.path.clone().unwrap_or_else(cli::default_config_path);
+    let display = path.display().to_string();
+
+    let yaml = match std::fs::read_to_string(&path) {
+        Ok(y) => y,
+        Err(e) => {
+            eprintln!("error: cannot read {display}: {e}");
+            return ExitCode::from(2);
+        }
+    };
+
+    let (jobs, diagnostics) = match config::parse(&yaml) {
+        Ok(cfg) => {
+            let n = cfg.jobs.len();
+            (n, validation::validate_config(&cfg))
+        }
+        Err(d) => (0, vec![d]),
+    };
+
+    let report = output::build_report(&display, jobs, &diagnostics);
+    let rendered = match args.format {
+        cli::OutputFormat::Json => output::render_json(&report),
+        cli::OutputFormat::Human => output::render_human(&report),
+    };
+    println!("{rendered}");
+
+    if report.ok {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    }
+}
+
+fn unimplemented(name: &str) -> anyhow::Result<ExitCode> {
     anyhow::bail!("`periodic {name}` is not implemented yet")
 }
 
