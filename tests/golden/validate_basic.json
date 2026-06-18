@@ -1,0 +1,18 @@
+{
+  "ok": false,
+  "config_path": "~/.config/periodic/periodic.config.yaml",
+  "summary": {
+    "jobs": 1,
+    "errors": 1,
+    "warnings": 0
+  },
+  "diagnostics": [
+    {
+      "severity": "error",
+      "code": "schedule.non_divisor",
+      "message": "every: 45m is not a divisor of 60",
+      "job": "cleanup",
+      "path": "jobs[0].schedule.every"
+    }
+  ]
+}

@@ -1,0 +1,7 @@
+version: 1
+jobs:
+  - id: cleanup
+    schedule:
+      every: 45m
+    execution:
+      command: echo "cleanup"
