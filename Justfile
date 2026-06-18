@@ -42,3 +42,14 @@ verify: fmt-check lint test
 # Run periodic with arbitrary args.
 run *args:
     cargo run -q -- {{args}}
+
+# Cut a clean release. Promote CHANGELOG.md (## Unreleased -> ## v{{version}})
+# by hand first; this then bumps the version, refreshes the lockfile, commits,
+# and creates the annotated tag the dist release workflow builds from. Reopen
+# the next -next cycle afterwards (see CONTRIBUTING.md).
+release version:
+    sed -i.bak 's/^version = ".*"/version = "{{version}}"/' Cargo.toml && rm -f Cargo.toml.bak
+    cargo check
+    git add Cargo.toml Cargo.lock CHANGELOG.md
+    git commit -m "Release v{{version}}"
+    git tag -a v{{version}} -m "periodic v{{version}}"
