@@ -6,14 +6,26 @@ yanked = "deny"
 unmaintained = "workspace"
 
 [licenses]
-# Exactly the licenses present in the current tree. A new dependency that
-# introduces another license (e.g. the rustls/webpki stack `periodic
-# self-update` will pull, typically CDLA-Permissive-2.0) intentionally trips
-# this gate so the license gets a deliberate review before being allowed.
+# The permissive licenses present in the tree. A new dependency that introduces
+# another license trips this gate for a deliberate review. Reviewed 2026-06-17
+# when self-update (axoupdater + rustls) was added: the rustls/reqwest stack
+# brings BSD-3-Clause, ISC, MIT-0, Zlib, CDLA-Permissive-2.0, Unlicense, CC0-1.0,
+# and Apache-2.0 WITH LLVM-exception — all permissive. LGPL-2.1-or-later is
+# deliberately NOT allowed; its only source (r-efi, a UEFI-target dep that never
+# compiles for our targets) is "MIT OR Apache-2.0 OR LGPL-2.1-or-later", so it is
+# satisfied via MIT/Apache without invoking the copyleft option.
 allow = [
-    "MIT",
     "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-3-Clause",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
     "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
 ]
 
 [bans]

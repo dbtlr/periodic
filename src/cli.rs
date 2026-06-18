@@ -7,7 +7,7 @@
 //! `--format` JSON contract, and norn's wholesale help renderer arrive in later
 //! phases as the commands that consume them land.
 
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 
 #[derive(Debug, Parser)]
 #[command(name = "periodic", version, propagate_version = true)]
@@ -55,6 +55,19 @@ pub(crate) enum Command {
     Doctor,
     /// Generate shell completions.
     Completion,
+    /// Update periodic in place.
+    SelfUpdate(SelfUpdateArgs),
+}
+
+/// `periodic self-update …`
+#[derive(Debug, Args)]
+pub(crate) struct SelfUpdateArgs {
+    /// Update to the latest prerelease (the `-next` channel) instead of stable.
+    #[arg(long)]
+    pub(crate) next: bool,
+    /// Update (or downgrade) to a specific release tag, e.g. `v0.2.0`.
+    #[arg(long, value_name = "TAG", conflicts_with = "next")]
+    pub(crate) tag: Option<String>,
 }
 
 /// `periodic daemon …`
@@ -94,19 +107,4 @@ pub(crate) enum JobsCommand {
 /// Parse the command line. Thin wrapper so `main` stays declarative.
 pub(crate) fn parse() -> Cli {
     Cli::parse()
-}
-
-/// Route a parsed command to its handler. Every command is stubbed until the
-/// phase that implements it lands.
-pub(crate) fn dispatch(cli: Cli) -> anyhow::Result<()> {
-    let command = match cli.command {
-        Command::Daemon(_) => "daemon",
-        Command::Jobs(_) => "jobs",
-        Command::Logs => "logs",
-        Command::Validate => "validate",
-        Command::Reload => "reload",
-        Command::Doctor => "doctor",
-        Command::Completion => "completion",
-    };
-    anyhow::bail!("`periodic {command}` is not implemented yet");
 }
