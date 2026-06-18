@@ -4,7 +4,7 @@ version = "0.1.0-next"
 edition = "2024"
 description = "A user-space recurring job scheduler for developer machines, devboxes, and lightweight infrastructure."
 repository = "https://github.com/dbtlr/periodic"
-license = "MIT OR Apache-2.0"
+license = "MIT"
 
 [dependencies]
 anyhow = "1.0.102"
