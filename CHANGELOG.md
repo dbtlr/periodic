@@ -7,6 +7,8 @@ is pre-1.0, minor versions (`0.x`) may carry breaking changes.
 
 ## [Unreleased]
 
+## v0.1.0 - 2026-06-17
+
 The first build of periodic — the `0.1` foundation. Most of this phase is build
 and release infrastructure (not user-facing); the user-visible surface is the
 installable binary and its update path.
