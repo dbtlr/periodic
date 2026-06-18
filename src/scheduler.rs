@@ -4,7 +4,7 @@
 
 use std::str::FromStr;
 
-use chrono::{DateTime, NaiveDateTime, TimeZone};
+use chrono::{DateTime, NaiveDateTime, TimeZone, Timelike};
 use chrono_tz::Tz;
 
 /// Resolve an optional IANA timezone name to a concrete [`Tz`].
@@ -90,6 +90,40 @@ pub(crate) fn resolve_wall_clock(naive: NaiveDateTime, tz: Tz) -> DateTime<Tz> {
     }
 }
 
+/// Next minute-aligned firing strictly after `after`, in that instant's zone.
+///
+/// `every_minutes` divides 60 (enforced by 0.2 validation), so boundaries fall
+/// at `:00, :every, :2·every, …` within each hour. The result is the first such
+/// wall-clock boundary later than `after`, resolved through the DST policy.
+#[allow(dead_code)] // consumed by the engine API dispatch (PDC-45)
+pub(crate) fn next_minute_aligned(every_minutes: u32, after: DateTime<Tz>) -> DateTime<Tz> {
+    let tz = after.timezone();
+    let wall = after.naive_local();
+    // Next boundary minute-of-hour strictly past the current minute. Since
+    // `every` divides 60, this lands in (0, 60]; 60 means minute 0 of next hour.
+    let next_min = (wall.minute() / every_minutes + 1) * every_minutes;
+    let base = wall.date().and_hms_opt(wall.hour(), 0, 0).unwrap();
+    let boundary = base + chrono::Duration::minutes(i64::from(next_min));
+    resolve_wall_clock(boundary, tz)
+}
+
+/// Next hour-aligned firing strictly after `after`, in that instant's zone.
+///
+/// `every_hours` divides 24 (enforced by 0.2 validation), so boundaries fall at
+/// `00:00, every:00, 2·every:00, …`. The result is the first such wall-clock
+/// boundary later than `after`, resolved through the DST policy.
+#[allow(dead_code)] // consumed by the engine API dispatch (PDC-45)
+pub(crate) fn next_hour_aligned(every_hours: u32, after: DateTime<Tz>) -> DateTime<Tz> {
+    let tz = after.timezone();
+    let wall = after.naive_local();
+    // Next boundary hour strictly past the current hour, in (0, 24]; 24 means
+    // hour 0 of the next day.
+    let next_hour = (wall.hour() / every_hours + 1) * every_hours;
+    let base = wall.date().and_hms_opt(0, 0, 0).unwrap();
+    let boundary = base + chrono::Duration::hours(i64::from(next_hour));
+    resolve_wall_clock(boundary, tz)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -101,6 +135,20 @@ mod tests {
             .unwrap()
             .and_hms_opt(h, min, 0)
             .unwrap()
+    }
+
+    /// A concrete UTC instant at the given wall-clock time (seconds default 0).
+    fn utc(y: i32, m: u32, d: u32, h: u32, min: u32) -> DateTime<Tz> {
+        resolve_wall_clock(naive(y, m, d, h, min), Tz::UTC)
+    }
+
+    /// A UTC instant with explicit seconds, for strict-after edge cases.
+    fn utc_s(y: i32, m: u32, d: u32, h: u32, min: u32, s: u32) -> DateTime<Tz> {
+        let nd = NaiveDate::from_ymd_opt(y, m, d)
+            .unwrap()
+            .and_hms_opt(h, min, s)
+            .unwrap();
+        resolve_wall_clock(nd, Tz::UTC)
     }
 
     #[test]
@@ -141,5 +189,66 @@ mod tests {
         assert_eq!(occ.scheduled_for, dt);
         // <job-id>:<kind>:<scheduled-for-rfc3339> — the offset makes DST folds distinct.
         assert_eq!(occ.key, "backup:calendar:2026-01-15T09:00:00-05:00");
+    }
+
+    // ── minute-aligned ──────────────────────────────────────────────────────
+
+    #[test]
+    fn minute_aligned_picks_the_next_boundary_within_the_hour() {
+        assert_eq!(
+            next_minute_aligned(15, utc(2026, 1, 15, 9, 7)),
+            utc(2026, 1, 15, 9, 15)
+        );
+    }
+
+    #[test]
+    fn minute_aligned_is_strict_when_already_on_a_boundary() {
+        assert_eq!(
+            next_minute_aligned(15, utc(2026, 1, 15, 9, 15)),
+            utc(2026, 1, 15, 9, 30)
+        );
+    }
+
+    #[test]
+    fn minute_aligned_advances_to_a_boundary_when_seconds_remain() {
+        // 09:15:30 has passed the :15 boundary -> next is :30.
+        assert_eq!(
+            next_minute_aligned(15, utc_s(2026, 1, 15, 9, 15, 30)),
+            utc(2026, 1, 15, 9, 30)
+        );
+    }
+
+    #[test]
+    fn minute_aligned_rolls_across_the_day() {
+        assert_eq!(
+            next_minute_aligned(30, utc(2026, 1, 15, 23, 45)),
+            utc(2026, 1, 16, 0, 0)
+        );
+    }
+
+    // ── hour-aligned ────────────────────────────────────────────────────────
+
+    #[test]
+    fn hour_aligned_picks_the_next_boundary() {
+        assert_eq!(
+            next_hour_aligned(6, utc(2026, 1, 15, 6, 30)),
+            utc(2026, 1, 15, 12, 0)
+        );
+    }
+
+    #[test]
+    fn hour_aligned_is_strict_when_already_on_a_boundary() {
+        assert_eq!(
+            next_hour_aligned(6, utc(2026, 1, 15, 12, 0)),
+            utc(2026, 1, 15, 18, 0)
+        );
+    }
+
+    #[test]
+    fn hour_aligned_rolls_across_the_day() {
+        assert_eq!(
+            next_hour_aligned(6, utc(2026, 1, 15, 18, 30)),
+            utc(2026, 1, 16, 0, 0)
+        );
     }
 }
