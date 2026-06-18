@@ -25,7 +25,8 @@ and minor versions may carry breaking changes.
 1. **Develop** on `X.Y.Z-next`. Build-affecting merges to `main` publish
    `vX.Y.Z-next.1`, `.2`, … as GitHub prereleases.
 2. **Cut a clean release** when the increment is done:
-   - Promote `CHANGELOG.md`: rename `## Unreleased` to `## vX.Y.Z - YYYY-MM-DD`.
+   - Promote `CHANGELOG.md`: rename `## [Unreleased]` to `## vX.Y.Z - YYYY-MM-DD`,
+     and add a fresh `## [Unreleased]` above it (see the `changelog` skill).
    - `just release X.Y.Z` — bumps to the clean version, refreshes the lockfile,
      commits, and creates the annotated `vX.Y.Z` tag.
    - `git push && git push --tags` — the tag triggers the dist release workflow,
