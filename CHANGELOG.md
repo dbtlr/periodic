@@ -7,6 +7,19 @@ is pre-1.0, minor versions (`0.x`) may carry breaking changes.
 
 ## [Unreleased]
 
+### Added
+
+- `periodic validate [PATH] [--format human|json]` — parse and strictly validate
+  the YAML config at `~/.config/periodic/periodic.config.yaml` (or an explicit
+  PATH), reporting all diagnostics in a single pass. Exit codes: `0` valid
+  (warnings do not fail), `1` validation errors, `2` config unreadable/missing.
+- `--format json` emits the stable, additive-only agent contract (decision 0002):
+  fields `ok`, `config_path`, `summary`, and `diagnostics` with `severity`,
+  `code`, `message`, and optional `job`/`path`/`line`/`col`.
+- Strict validation rules: unknown-field rejection, wall-clock divisor
+  enforcement (decision 0001), cron expression / timezone / duration validation,
+  and job ID uniqueness and naming checks.
+
 ## v0.1.0 - 2026-06-17
 
 The first build of periodic — the `0.1` foundation. Most of this phase is build
