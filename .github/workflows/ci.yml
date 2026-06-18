@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "17 4 * * 1" # weekly cargo audit / cargo deny refresh
+
+jobs:
+  ci:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit,cargo-deny
+
+      - name: cargo fmt --check
+        run: cargo fmt --check
+
+      - name: cargo clippy -D warnings
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: cargo test --locked
+        run: cargo test --locked
+
+      - name: cargo build --release --locked
+        run: cargo build --release --locked
+
+      - name: completions + man page emitted by build.rs
+        run: |
+          test -s target/completions/periodic.bash
+          test -s target/completions/_periodic
+          test -s target/completions/periodic.fish
+          test -s target/man/periodic.1
+
+      - name: cargo install --path . --locked
+        run: cargo install --path . --locked
+
+      - name: periodic --help smoke
+        run: periodic --help
+
+      - name: cargo audit
+        run: cargo audit
+
+      - name: cargo deny check
+        run: cargo deny check
