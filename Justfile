@@ -53,3 +53,12 @@ release version:
     git add Cargo.toml Cargo.lock CHANGELOG.md
     git commit -m "Release v{{version}}"
     git tag -a v{{version}} -m "periodic v{{version}}"
+
+# Open the next development cycle after a release: set the version to
+# {{version}}-next and commit, so the prerelease channel resumes. The version
+# guard fails any build that skips this step. See CONTRIBUTING.md.
+open-next version:
+    sed -i.bak 's/^version = ".*"/version = "{{version}}-next"/' Cargo.toml && rm -f Cargo.toml.bak
+    cargo check
+    git add Cargo.toml Cargo.lock
+    git commit -m "Open {{version}}-next development cycle"
