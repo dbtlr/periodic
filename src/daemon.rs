@@ -174,11 +174,13 @@ fn scheduler_loop(
             tracing::warn!(error = %e, "heartbeat write failed");
         }
 
+        runs.retain(|r| !r.finished());
+        let active: std::collections::HashSet<String> =
+            runs.iter().map(|r| r.job_id.clone()).collect();
         let due = table.pop_due(now);
-        for run in dispatch_due(conn, due, now) {
+        for run in dispatch_due(conn, due, &active, now) {
             runs.push(run);
         }
-        runs.retain(|r| !r.finished());
 
         let dur = sleep_until(table.next_wake(), Utc::now());
         match control_rx.recv_timeout(dur) {
@@ -220,6 +222,7 @@ fn sleep_until(next_wake: Option<DateTime<Utc>>, now: DateTime<Utc>) -> Duration
 /// A handle on a dispatched run thread plus its per-run cancel flag, so shutdown
 /// can request cancellation and join.
 struct RunHandle {
+    job_id: String,
     handle: thread::JoinHandle<()>,
     cancel: Arc<AtomicBool>,
     done: Arc<AtomicBool>,
@@ -240,6 +243,7 @@ impl RunHandle {
 fn dispatch_due(
     conn: &Connection,
     due: Vec<crate::scheduler::DueRun>,
+    active: &std::collections::HashSet<String>,
     now: DateTime<Utc>,
 ) -> Vec<RunHandle> {
     let mut handles = Vec::new();
@@ -268,6 +272,16 @@ fn dispatch_due(
             // Already ran (restart/reload dup); skip.
             continue;
         }
+        // Overlap policy = skip (the only v1 policy): if a prior run of this job is
+        // still in flight, record this occurrence as skipped_overlap (decision B —
+        // non-executing outcomes are real run rows) and do not start a second run.
+        if active.contains(job_id) {
+            if let Err(e) = state::finish_run(conn, &run_id, "skipped_overlap", None, None, now) {
+                tracing::warn!(error = %e, job = job_id, "failed to record skipped_overlap");
+            }
+            tracing::info!(job = job_id, occurrence = %d.occurrence_key, "skipped (overlap)");
+            continue;
+        }
         tracing::info!(job = job_id, occurrence = %d.occurrence_key, "dispatching scheduled run");
         handles.push(spawn_run(d.job, run_id));
     }
@@ -279,6 +293,7 @@ fn dispatch_due(
 fn spawn_run(job: crate::config::EffectiveJob, run_id: String) -> RunHandle {
     let cancel = Arc::new(AtomicBool::new(false));
     let done = Arc::new(AtomicBool::new(false));
+    let run_job_id = job.id.as_deref().unwrap_or("").to_owned();
     let thread_cancel = Arc::clone(&cancel);
     let thread_done = Arc::clone(&done);
     let handle = thread::spawn(move || {
@@ -300,6 +315,7 @@ fn spawn_run(job: crate::config::EffectiveJob, run_id: String) -> RunHandle {
         thread_done.store(true, Ordering::SeqCst);
     });
     RunHandle {
+        job_id: run_job_id,
         handle,
         cancel,
         done,
@@ -662,7 +678,12 @@ mod tests {
     #[test]
     fn fresh_occurrence_claims_and_dispatches() {
         let (_d, conn) = temp_conn();
-        let handles = dispatch_due(&conn, vec![due(minute_job("a"), "a:minute:t")], at(1000));
+        let handles = dispatch_due(
+            &conn,
+            vec![due(minute_job("a"), "a:minute:t")],
+            &std::collections::HashSet::new(),
+            at(1000),
+        );
         assert_eq!(
             handles.len(),
             1,
@@ -696,10 +717,43 @@ mod tests {
             at(900),
         )
         .unwrap();
-        let handles = dispatch_due(&conn, vec![due(minute_job("a"), "a:minute:t")], at(1000));
+        let handles = dispatch_due(
+            &conn,
+            vec![due(minute_job("a"), "a:minute:t")],
+            &std::collections::HashSet::new(),
+            at(1000),
+        );
         assert!(
             handles.is_empty(),
             "a duplicate occurrence_key (create_run=false) must not dispatch"
+        );
+    }
+
+    #[test]
+    fn active_job_occurrence_is_recorded_skipped_overlap() {
+        let (_d, conn) = temp_conn();
+        let mut active = std::collections::HashSet::new();
+        active.insert("a".to_string());
+        let handles = dispatch_due(
+            &conn,
+            vec![due(minute_job("a"), "a:minute:t2")],
+            &active,
+            at(2000),
+        );
+        assert!(
+            handles.is_empty(),
+            "an in-flight job does not start a second run"
+        );
+        let status: String = conn
+            .query_row(
+                "select status from runs where occurrence_key = 'a:minute:t2'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            status, "skipped_overlap",
+            "the skipped occurrence is recorded"
         );
     }
 }
