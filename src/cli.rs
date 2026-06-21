@@ -76,11 +76,26 @@ pub(crate) struct SelfUpdateArgs {
 #[derive(Debug, Subcommand)]
 pub(crate) enum DaemonCommand {
     /// Start the daemon.
-    Start,
+    Start {
+        /// Run the scheduler loop in the foreground (the default).
+        #[arg(long)]
+        foreground: bool,
+        /// Re-spawn detached in the background and return the child pid.
+        #[arg(long, conflicts_with = "foreground")]
+        detach: bool,
+    },
     /// Stop the daemon.
-    Stop,
+    Stop {
+        /// Send SIGKILL instead of SIGTERM.
+        #[arg(long)]
+        force: bool,
+    },
     /// Show daemon status.
-    Status,
+    Status {
+        /// Output format.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        format: OutputFormat,
+    },
 }
 
 /// `periodic jobs …`

@@ -7,6 +7,23 @@ is pre-1.0, minor versions (`0.x`) may carry breaking changes.
 
 ## [Unreleased]
 
+### Added
+
+- `periodic daemon start [--foreground] [--detach]` — run the scheduler daemon. By
+  default (and with `--foreground`) it runs the loop in the foreground until
+  signalled; `--detach` re-spawns it as a detached background process and prints the
+  child pid. On startup it validates the config, reconciles state, recovers runs
+  interrupted by a prior crash, and then dispatches due jobs to their own process
+  groups. Refuses to start (exit `1`, `daemon already running (pid N)`) when a live
+  daemon already holds the heartbeat. SIGTERM/SIGINT trigger a graceful shutdown
+  that drains in-flight runs (up to a 10s grace) before exiting.
+- `periodic daemon stop [--force]` — stop the running daemon by sending SIGTERM
+  (or SIGKILL with `--force`) to the recorded pid. Idempotent: a missing or
+  already-stopped daemon prints `daemon not running` and exits `0`.
+- `periodic daemon status [--format json]` — report daemon liveness from the
+  recorded heartbeat: `running (pid N)`, `stopped`, `not responding` (stale
+  heartbeat), or `not running`. JSON: `{ "daemon": { "state", "pid", "running" } }`.
+
 ### Changed
 
 - `periodic doctor` now also reports daemon liveness — `not running`, `running
