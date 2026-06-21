@@ -7,6 +7,13 @@ is pre-1.0, minor versions (`0.x`) may carry breaking changes.
 
 ## [Unreleased]
 
+## v0.5.0 - 2026-06-21
+
+The `0.5` increment — execution. periodic now runs jobs: `periodic jobs run`
+executes a job in the foreground with full process-lifecycle management (its own
+process group, timeout, retries), records each run to the state database, and
+surfaces run history and captured output via `jobs history` and `logs`.
+
 ### Added
 
 - `periodic jobs run <id>` — execute a job now, in the foreground, recording the
