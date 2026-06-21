@@ -36,6 +36,11 @@ is pre-1.0, minor versions (`0.x`) may carry breaking changes.
   under the per-user service manager (launchd on macOS, `systemd --user` on Linux)
   so it starts at login and restarts on failure. `install` registers a unit that
   runs `periodic daemon start --foreground`; the other subcommands drive it.
+- `periodic reload` — validate the config, then apply it dual-mode: a running
+  daemon is asked over IPC to atomically swap its in-memory schedule (keeping the
+  last-known-good schedule if the new config is invalid); when the daemon is
+  stopped, the on-disk config is validated and applied on the next start. A config
+  error exits `1` without touching a running daemon.
 
 ### Changed
 
