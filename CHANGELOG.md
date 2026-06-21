@@ -31,7 +31,6 @@ is pre-1.0, minor versions (`0.x`) may carry breaking changes.
   `skip` (default) records one collapsed `skipped` run so the miss is visible in
   history; `run_once` runs the most recent missed occurrence; `run_all` runs each.
   Occurrence-key dedupe means a run that already completed is never repeated.
-
 - `periodic service install | uninstall | start | stop | status` — run the daemon
   under the per-user service manager (launchd on macOS, `systemd --user` on Linux)
   so it starts at login and restarts on failure. `install` registers a unit that
