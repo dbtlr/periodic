@@ -325,6 +325,41 @@ pub(crate) fn job_exists(conn: &Connection, job_id: &str) -> Result<bool> {
     Ok(n > 0)
 }
 
+// ─── run history reads ───────────────────────────────────────────────────────
+
+/// A `runs` row as surfaced by `jobs history`. `attempts` is the count of
+/// `run_attempts` for the run. Serializes to the frozen JSON run shape (0002).
+#[derive(Debug, Serialize, PartialEq)]
+pub(crate) struct RunRow {
+    pub(crate) id: String,
+    pub(crate) status: String,
+    pub(crate) trigger_type: String,
+    pub(crate) started_at: Option<String>,
+    pub(crate) finished_at: Option<String>,
+    pub(crate) exit_code: Option<i64>,
+    pub(crate) attempts: i64,
+}
+
+/// Runs for a job, most recent first (by `created_at`), capped at `limit`.
+pub(crate) fn list_runs(conn: &Connection, job_id: &str, limit: i64) -> Result<Vec<RunRow>> {
+    let mut stmt = conn.prepare(
+        "select r.id, r.status, r.trigger_type, r.started_at, r.finished_at, r.exit_code,
+                (select count(*) from run_attempts a where a.run_id = r.id) as attempts
+         from runs r where r.job_id = ?1
+         order by r.created_at desc, r.id desc limit ?2",
+    )?;
+    let rows = stmt
+        .query_map(rusqlite::params![job_id, limit], |row| {
+            Ok(RunRow {
+                id: row.get(0)?, status: row.get(1)?, trigger_type: row.get(2)?,
+                started_at: row.get(3)?, finished_at: row.get(4)?,
+                exit_code: row.get(5)?, attempts: row.get(6)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
 // ─── health inspection (read-only) ───────────────────────────────────────────
 
 /// A read-only snapshot of the state database's health, for `periodic doctor`.
@@ -966,5 +1001,35 @@ mod run_writer_tests {
         start_attempt_pid(&conn, "a1", 4242).unwrap();
         let pid: Option<i64> = conn.query_row("select pid from run_attempts where id='a1'", [], |r| r.get(0)).unwrap();
         assert_eq!(pid, Some(4242));
+    }
+
+    #[test]
+    fn list_runs_returns_recent_first_with_attempt_count() {
+        let (_d, conn) = temp_db();
+        create_run(&conn, "r1", "cleanup", "h", "manual", at(1000)).unwrap();
+        mark_run_running(&conn, "r1", at(1000)).unwrap();
+        start_attempt(&conn, "a1", "r1", 1, None, at(1000)).unwrap();
+        finish_attempt(&conn, "a1", "success", Some(0), None, None, at(1001)).unwrap();
+        finish_run(&conn, "r1", "success", Some(0), None, at(1001)).unwrap();
+        create_run(&conn, "r2", "cleanup", "h", "manual", at(2000)).unwrap();
+        mark_run_running(&conn, "r2", at(2000)).unwrap();
+        finish_run(&conn, "r2", "failed", Some(1), None, at(2001)).unwrap();
+
+        let rows = list_runs(&conn, "cleanup", 10).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].id, "r2", "most recent first");
+        assert_eq!(rows[0].status, "failed");
+        assert_eq!(rows[1].attempts, 1);
+    }
+
+    #[test]
+    fn list_runs_honors_limit() {
+        let (_d, conn) = temp_db();
+        for i in 0..5 {
+            let id = format!("r{i}");
+            create_run(&conn, &id, "cleanup", "h", "manual", at(1000 + i)).unwrap();
+            mark_run_running(&conn, &id, at(1000 + i)).unwrap();
+        }
+        assert_eq!(list_runs(&conn, "cleanup", 3).unwrap().len(), 3);
     }
 }
