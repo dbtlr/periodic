@@ -7,6 +7,12 @@ is pre-1.0, minor versions (`0.x`) may carry breaking changes.
 
 ## [Unreleased]
 
+### Fixed
+
+- `periodic logs <id>` now exits `1` with `error: no such job` when the job is not
+  in the config, instead of silently printing "no output" and exiting `0`. A known
+  job with no captured output still reports "no output" and exits `0`.
+
 ## v0.5.0 - 2026-06-21
 
 The `0.5` increment — execution. periodic now runs jobs: `periodic jobs run`

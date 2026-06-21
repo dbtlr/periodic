@@ -73,6 +73,7 @@ pub(crate) fn run_job(
     logs_dir: &Path,
     job: &EffectiveJob,
     now: DateTime<Utc>,
+    cancel: &AtomicBool,
 ) -> Result<RunOutcome> {
     let job_id = job.id.as_deref().unwrap_or("");
     let run_id = format!("{job_id}-{}", now.timestamp_micros());
@@ -104,6 +105,7 @@ pub(crate) fn run_job(
             attempt_number,
             &writer,
             now,
+            cancel,
         )?;
         match result {
             AttemptResult::Exited(0) => break (RunStatus::Success, Some(0), attempt_number as u32),
@@ -121,7 +123,7 @@ pub(crate) fn run_job(
     };
 
     let run_finished = Utc::now();
-    finalize(conn, job_id, &run_id, status, exit_code, now, run_finished)?;
+    finalize(conn, job_id, &run_id, status, exit_code, run_finished)?;
     Ok(RunOutcome {
         id: run_id,
         job_id: job_id.to_owned(),
@@ -140,7 +142,6 @@ fn finalize(
     run_id: &str,
     status: RunStatus,
     exit_code: Option<i32>,
-    now: DateTime<Utc>,
     run_finished: DateTime<Utc>,
 ) -> Result<()> {
     state::finish_run(conn, run_id, status.as_str(), exit_code, None, run_finished)?;
@@ -157,7 +158,15 @@ fn finalize(
         RunStatus::Timeout => EventKind::RunTimeout,
         RunStatus::Cancelled => EventKind::RunCancelled,
     };
-    events::emit(conn, kind, job_id, run_id, None, status.as_str(), now)?;
+    events::emit(
+        conn,
+        kind,
+        job_id,
+        run_id,
+        None,
+        status.as_str(),
+        run_finished,
+    )?;
     Ok(())
 }
 
@@ -172,6 +181,7 @@ fn run_attempt(
     attempt_number: i64,
     writer: &Arc<Mutex<DailyLogWriter>>,
     now: DateTime<Utc>,
+    cancel: &AtomicBool,
 ) -> Result<AttemptResult> {
     let mut cmd = Command::new(&job.command);
     cmd.args(&job.args)
@@ -215,7 +225,7 @@ fn run_attempt(
                 run_id,
                 Some(attempt_id),
                 &e.to_string(),
-                now,
+                spawn_failed_at,
             )?;
             return Ok(AttemptResult::Exited(127));
         }
@@ -247,7 +257,7 @@ fn run_attempt(
         let _ = tx.send(child.wait());
     });
 
-    let result = wait_loop(&rx, pid, job.timeout_secs);
+    let result = wait_loop(&rx, pid, job.timeout_secs, cancel);
     let attempt_finished = Utc::now();
     let _ = waiter.join();
     let _ = t_out.join();
@@ -265,7 +275,15 @@ fn run_attempt(
     } else {
         EventKind::AttemptFailed
     };
-    events::emit(conn, ev, job_id, run_id, Some(attempt_id), status, now)?;
+    events::emit(
+        conn,
+        ev,
+        job_id,
+        run_id,
+        Some(attempt_id),
+        status,
+        attempt_finished,
+    )?;
     Ok(result)
 }
 
@@ -304,12 +322,13 @@ fn spawn_reader<R: std::io::Read + Send + 'static>(
     })
 }
 
-/// Poll for the child to exit, honoring an optional timeout and the global CANCEL
+/// Poll for the child to exit, honoring an optional timeout and the per-run cancel
 /// flag. On timeout/cancel: SIGTERM the group, wait `KILL_GRACE`, then SIGKILL.
 fn wait_loop(
     rx: &mpsc::Receiver<std::io::Result<std::process::ExitStatus>>,
     pid: i32,
     timeout_secs: Option<u64>,
+    cancel: &AtomicBool,
 ) -> AttemptResult {
     let tick = Duration::from_millis(100);
     let deadline = timeout_secs.map(|s| Instant::now() + Duration::from_secs(s));
@@ -321,7 +340,7 @@ fn wait_loop(
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
-        if CANCEL.load(Ordering::SeqCst) {
+        if cancel.load(Ordering::SeqCst) {
             kill_group(pid);
             return drain_after_kill(rx, pid, AttemptResult::Cancelled);
         }
@@ -411,6 +430,16 @@ mod tests {
         }
     }
 
+    /// Run with a fresh, un-cancelled per-run flag (the common case in tests).
+    fn run_job_t(
+        conn: &rusqlite::Connection,
+        logs_dir: &Path,
+        job: &EffectiveJob,
+        now: DateTime<Utc>,
+    ) -> Result<RunOutcome> {
+        run_job(conn, logs_dir, job, now, &AtomicBool::new(false))
+    }
+
     fn fixture() -> (tempfile::TempDir, rusqlite::Connection) {
         let dir = tempfile::tempdir().unwrap();
         let conn = crate::state::open(&dir.path().join("p.db")).unwrap();
@@ -430,7 +459,7 @@ mod tests {
     fn successful_command_records_success_run() {
         let (dir, conn) = fixture();
         seed(&conn, "ok");
-        let out = run_job(
+        let out = run_job_t(
             &conn,
             &dir.path().join("logs"),
             &job("ok", "true", &[]),
@@ -451,7 +480,7 @@ mod tests {
     fn failing_command_records_failed_run_and_increments_failures() {
         let (dir, conn) = fixture();
         seed(&conn, "bad");
-        let out = run_job(
+        let out = run_job_t(
             &conn,
             &dir.path().join("logs"),
             &job("bad", "false", &[]),
@@ -475,7 +504,7 @@ mod tests {
         let (dir, conn) = fixture();
         seed(&conn, "echoer");
         let logs = dir.path().join("logs");
-        let out = run_job(&conn, &logs, &job("echoer", "echo", &["hi-there"]), now()).unwrap();
+        let out = run_job_t(&conn, &logs, &job("echoer", "echo", &["hi-there"]), now()).unwrap();
         let recs = crate::logs::read_logs(&logs, "echoer", Some(&out.id)).unwrap();
         assert!(
             recs.iter()
@@ -488,7 +517,7 @@ mod tests {
     fn spawn_failure_records_failed_run_and_attempt() {
         let (dir, conn) = fixture();
         seed(&conn, "nosuchbin");
-        let out = run_job(
+        let out = run_job_t(
             &conn,
             &dir.path().join("logs"),
             &job("nosuchbin", "periodic_no_such_command_xyz", &[]),
@@ -527,7 +556,7 @@ mod tests {
     fn timeout_terminates_and_marks_timeout() {
         let (dir, conn) = fixture();
         seed(&conn, "slow");
-        let out = run_job(
+        let out = run_job_t(
             &conn,
             &dir.path().join("logs"),
             &job_to("slow", "sleep", &["30"], Some(1), 0),
@@ -545,7 +574,7 @@ mod tests {
     fn retries_on_failure_then_records_attempts() {
         let (dir, conn) = fixture();
         seed(&conn, "retry");
-        let out = run_job(
+        let out = run_job_t(
             &conn,
             &dir.path().join("logs"),
             &job_to("retry", "false", &[], None, 2),
@@ -568,7 +597,7 @@ mod tests {
     fn timeout_is_not_retried() {
         let (dir, conn) = fixture();
         seed(&conn, "slow2");
-        let out = run_job(
+        let out = run_job_t(
             &conn,
             &dir.path().join("logs"),
             &job_to("slow2", "sleep", &["30"], Some(1), 3),
@@ -577,5 +606,59 @@ mod tests {
         .unwrap();
         assert!(matches!(out.status, RunStatus::Timeout));
         assert_eq!(out.attempts, 1, "timeout is terminal, not retried");
+    }
+
+    #[test]
+    fn injected_cancel_flag_terminates_the_run() {
+        // Per-run cancellation: a flag already set before dispatch aborts the run.
+        // This is the loop-safe replacement for a process-global CANCEL — concurrent
+        // daemon runs each carry their own flag, so one cancel can't kill another run.
+        let (dir, conn) = fixture();
+        seed(&conn, "cancelme");
+        let cancel = AtomicBool::new(true);
+        let out = run_job(
+            &conn,
+            &dir.path().join("logs"),
+            &job_to("cancelme", "sleep", &["5"], None, 0),
+            now(),
+            &cancel,
+        )
+        .unwrap();
+        assert!(
+            matches!(out.status, RunStatus::Cancelled),
+            "got {:?}",
+            out.status
+        );
+    }
+
+    #[test]
+    fn terminal_event_stamps_real_finish_time_not_injected_start() {
+        // Durations are read from event timestamps; the closing event must carry the
+        // real finish instant, not the injected start `now`, or durations understate.
+        let (dir, conn) = fixture();
+        seed(&conn, "stamp");
+        let out = run_job_t(
+            &conn,
+            &dir.path().join("logs"),
+            &job("stamp", "true", &[]),
+            now(),
+        )
+        .unwrap();
+        let created: String = conn
+            .query_row(
+                "select created_at from events where run_id=?1 and event_type='run_succeeded'",
+                [&out.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_ne!(
+            created,
+            now().to_rfc3339(),
+            "terminal event must not stamp the injected start time"
+        );
+        assert_eq!(
+            created, out.finished_at,
+            "terminal event time == run finished_at"
+        );
     }
 }

@@ -252,10 +252,13 @@ pub(crate) fn create_run(
 /// Transition a run to `running`, stamping `started_at`.
 pub(crate) fn mark_run_running(conn: &Connection, id: &str, now: DateTime<Utc>) -> Result<()> {
     let ts = now.to_rfc3339();
-    conn.execute(
+    let n = conn.execute(
         "update runs set status='running', started_at=?2, updated_at=?2 where id=?1",
         rusqlite::params![id, ts],
     )?;
+    if n == 0 {
+        return Err(Error::NoRowUpdated(format!("run {id}")));
+    }
     Ok(())
 }
 
@@ -269,10 +272,13 @@ pub(crate) fn finish_run(
     now: DateTime<Utc>,
 ) -> Result<()> {
     let ts = now.to_rfc3339();
-    conn.execute(
+    let n = conn.execute(
         "update runs set status=?2, exit_code=?3, error=?4, finished_at=?5, updated_at=?5 where id=?1",
         rusqlite::params![id, status, exit_code.map(i64::from), error, ts],
     )?;
+    if n == 0 {
+        return Err(Error::NoRowUpdated(format!("run {id}")));
+    }
     Ok(())
 }
 
@@ -296,10 +302,13 @@ pub(crate) fn start_attempt(
 
 /// Record the OS pid on an already-started attempt (known only post-spawn).
 pub(crate) fn start_attempt_pid(conn: &Connection, id: &str, pid: i32) -> Result<()> {
-    conn.execute(
+    let n = conn.execute(
         "update run_attempts set pid=?2 where id=?1",
         rusqlite::params![id, i64::from(pid)],
     )?;
+    if n == 0 {
+        return Err(Error::NoRowUpdated(format!("attempt {id}")));
+    }
     Ok(())
 }
 
@@ -314,11 +323,14 @@ pub(crate) fn finish_attempt(
     now: DateTime<Utc>,
 ) -> Result<()> {
     let ts = now.to_rfc3339();
-    conn.execute(
+    let n = conn.execute(
         "update run_attempts set status=?2, exit_code=?3, signal=?4, error=?5, finished_at=?6, updated_at=?6
          where id=?1",
         rusqlite::params![id, status, exit_code.map(i64::from), signal.map(i64::from), error, ts],
     )?;
+    if n == 0 {
+        return Err(Error::NoRowUpdated(format!("attempt {id}")));
+    }
     Ok(())
 }
 
@@ -488,6 +500,31 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let conn = open(&dir.path().join("periodic.db")).unwrap();
         (dir, conn)
+    }
+
+    #[test]
+    fn terminal_writers_error_on_missing_row() {
+        // Once writes come from separate daemon code paths, an UPDATE that matches no
+        // row must surface as an error, not a silent no-op.
+        use chrono::TimeZone;
+        let (_d, conn) = temp_db();
+        let now = Utc.timestamp_opt(1000, 0).unwrap();
+        assert!(
+            mark_run_running(&conn, "ghost", now).is_err(),
+            "mark_run_running on missing run must error"
+        );
+        assert!(
+            finish_run(&conn, "ghost", "success", Some(0), None, now).is_err(),
+            "finish_run on missing run must error"
+        );
+        assert!(
+            start_attempt_pid(&conn, "ghost", 42).is_err(),
+            "start_attempt_pid on missing attempt must error"
+        );
+        assert!(
+            finish_attempt(&conn, "ghost", "success", Some(0), None, None, now).is_err(),
+            "finish_attempt on missing attempt must error"
+        );
     }
 
     fn table_names(conn: &Connection) -> Vec<String> {

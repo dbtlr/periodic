@@ -20,6 +20,9 @@ pub(crate) enum Error {
 
     #[error("log I/O error: {0}")]
     Io(std::io::Error),
+
+    #[error("state update affected no rows: {0}")]
+    NoRowUpdated(String),
 }
 
 pub(crate) type Result<T> = std::result::Result<T, Error>;
