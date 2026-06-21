@@ -23,6 +23,9 @@ is pre-1.0, minor versions (`0.x`) may carry breaking changes.
 - `periodic daemon status [--format json]` — report daemon liveness from the
   recorded heartbeat: `running (pid N)`, `stopped`, `not responding` (stale
   heartbeat), or `not running`. JSON: `{ "daemon": { "state", "pid", "running" } }`.
+- Overlap policy `skip` (the v1 default): when a scheduled occurrence fires while a
+  prior run of the same job is still in flight, the daemon records it as a
+  `skipped_overlap` run (visible in `jobs history`) instead of starting a second run.
 
 ### Changed
 
