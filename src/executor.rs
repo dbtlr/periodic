@@ -20,7 +20,6 @@ use crate::logs::{DailyLogWriter, LogRecord};
 use crate::state;
 
 /// Grace between SIGTERM and SIGKILL on timeout/cancel (config knob deferred).
-#[allow(dead_code)]
 const KILL_GRACE: Duration = Duration::from_secs(5);
 
 /// Set true by the SIGINT handler installed in `main`; the wait loop forwards a
@@ -29,7 +28,6 @@ pub(crate) static CANCEL: AtomicBool = AtomicBool::new(false);
 
 /// Terminal outcome of a run (manual subset of run statuses).
 #[derive(Debug, Clone, Copy, PartialEq)]
-#[allow(dead_code)]
 pub(crate) enum RunStatus {
     Success,
     Failed,
@@ -50,7 +48,6 @@ impl RunStatus {
 
 /// What `jobs run` reports and renders.
 #[derive(Debug)]
-#[allow(dead_code)]
 pub(crate) struct RunOutcome {
     pub(crate) id: String,
     pub(crate) job_id: String,
@@ -63,7 +60,6 @@ pub(crate) struct RunOutcome {
 
 /// How a single attempt ended.
 #[derive(Clone, Copy)]
-#[allow(dead_code)]
 enum AttemptResult {
     Exited(i32),
     Timeout,
@@ -72,7 +68,6 @@ enum AttemptResult {
 
 /// Execute `job` once (single attempt — the retry loop wraps this in Task 8),
 /// recording run/attempt/event rows and tee-ing output to the terminal + JSONL.
-#[allow(dead_code)]
 pub(crate) fn run_job(
     conn: &rusqlite::Connection,
     logs_dir: &Path,
