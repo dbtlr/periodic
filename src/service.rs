@@ -18,6 +18,9 @@ use std::process::ExitCode;
 use crate::cli::ServiceCommand;
 
 /// The launchd label / reverse-DNS identifier for the daemon agent (macOS).
+/// Exercised by the cross-platform plist tests; the runtime backend that consumes
+/// it is `cfg(target_os = "macos")` only.
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
 pub(crate) const LAUNCHD_LABEL: &str = "com.dbtlr.periodic.daemon";
 
 /// The systemd `--user` unit name (without the `.service` suffix) (Linux).
@@ -56,6 +59,7 @@ fn home_dir() -> anyhow::Result<PathBuf> {
 // ─── macOS: launchd ──────────────────────────────────────────────────────────
 
 /// Path to the LaunchAgent plist under `<home>/Library/LaunchAgents/`.
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
 fn plist_path(home: &Path) -> PathBuf {
     home.join("Library/LaunchAgents")
         .join(format!("{LAUNCHD_LABEL}.plist"))
@@ -63,6 +67,7 @@ fn plist_path(home: &Path) -> PathBuf {
 
 /// Generate the launchd plist for the daemon agent. `exe` is the periodic binary,
 /// `log_dir` the directory for stdout/stderr capture. Pure string generation.
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
 fn plist_contents(exe: &Path, log_dir: &Path) -> String {
     let exe = exe.display();
     let stdout = log_dir.join("daemon.out.log");
