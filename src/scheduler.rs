@@ -2,12 +2,14 @@
 //! wall-clock alignment, occurrence identity, missed-run detection, and
 //! clock-jump/DST handling. Emits run intents; never spawns processes.
 
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
 use std::str::FromStr;
 
-use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, TimeZone, Timelike, Weekday};
+use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, TimeZone, Timelike, Utc, Weekday};
 use chrono_tz::Tz;
 
-use crate::config::NormalizedSchedule;
+use crate::config::{EffectiveConfig, EffectiveJob, NormalizedSchedule};
 
 /// Resolve an optional IANA timezone name to a concrete [`Tz`].
 ///
@@ -296,6 +298,223 @@ pub(crate) fn next_occurrence(
     // the computation ran. The wall-clock kinds already land on whole seconds.
     let instant = instant.with_nanosecond(0).unwrap_or(instant);
     Some(Occurrence::new(job_id, kind, instant))
+}
+
+// ─── the scheduler loop core: in-memory schedule table ───────────────────────
+// The daemon (PDC-74) drives this on its own thread: sleep until `next_wake`,
+// then dispatch `pop_due` to the executor. The table is the "boring" scheduler —
+// it computes occurrences and emits intents; it never spawns processes.
+
+/// A due firing the daemon should dispatch to the executor. Owns a clone of the
+/// job so it can be handed to a run thread; `occurrence_key` feeds `create_run`'s
+/// dedupe; `scheduled_for` is the occurrence instant (UTC).
+#[allow(dead_code)] // consumed by the daemon dispatch loop in PDC-74
+pub(crate) struct DueRun {
+    pub(crate) job: EffectiveJob,
+    pub(crate) occurrence_key: String,
+    pub(crate) scheduled_for: DateTime<Utc>,
+}
+
+/// One scheduled job and its upcoming firing, ordered by `scheduled_for` (then id
+/// for determinism) so a min-heap surfaces the earliest-due job.
+struct Entry {
+    scheduled_for: DateTime<Tz>,
+    key: String,
+    job: EffectiveJob,
+}
+
+impl PartialEq for Entry {
+    fn eq(&self, other: &Self) -> bool {
+        self.scheduled_for == other.scheduled_for && self.key == other.key
+    }
+}
+impl Eq for Entry {}
+impl Ord for Entry {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.scheduled_for
+            .cmp(&other.scheduled_for)
+            .then_with(|| self.key.cmp(&other.key))
+    }
+}
+impl PartialOrd for Entry {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// In-memory table of scheduled jobs, keyed by next firing. A `BinaryHeap` with
+/// `Reverse` makes it a min-heap, so the earliest-due job is always at the top.
+#[allow(dead_code)] // consumed by the daemon loop in PDC-74
+pub(crate) struct ScheduleTable {
+    heap: BinaryHeap<Reverse<Entry>>,
+}
+
+#[allow(dead_code)] // methods consumed by the daemon loop in PDC-74
+impl ScheduleTable {
+    /// Build the table from the effective config, computing each enabled, keyed
+    /// job's first occurrence after `now`. Disabled and unkeyed jobs are skipped.
+    pub(crate) fn build(config: &EffectiveConfig, now: DateTime<Utc>) -> Self {
+        let mut heap = BinaryHeap::new();
+        for job in &config.jobs {
+            if !job.enabled {
+                continue;
+            }
+            let Some(job_id) = job.id.as_deref() else {
+                continue;
+            };
+            let tz = resolve_timezone(job.timezone.as_deref());
+            if let Some(occ) = next_occurrence(job_id, &job.schedule, tz, now.with_timezone(&tz)) {
+                heap.push(Reverse(Entry {
+                    scheduled_for: occ.scheduled_for,
+                    key: occ.key,
+                    job: job.clone(),
+                }));
+            }
+        }
+        ScheduleTable { heap }
+    }
+
+    /// Number of scheduled jobs in the table.
+    pub(crate) fn len(&self) -> usize {
+        self.heap.len()
+    }
+
+    /// The earliest upcoming firing instant, or `None` when nothing is scheduled.
+    /// The daemon sleeps until this (or a control event) before the next tick.
+    pub(crate) fn next_wake(&self) -> Option<DateTime<Utc>> {
+        self.heap
+            .peek()
+            .map(|Reverse(e)| e.scheduled_for.with_timezone(&Utc))
+    }
+
+    /// Pop every job whose firing is due at `now`, returning one `DueRun` each and
+    /// rescheduling it to its next occurrence strictly after `now`. Intermediate
+    /// missed occurrences collapse into the single returned run (no backlog); the
+    /// missed-run *policy* (skip vs run-once) is applied by the caller in PDC-71.
+    pub(crate) fn pop_due(&mut self, now: DateTime<Utc>) -> Vec<DueRun> {
+        let mut due = Vec::new();
+        loop {
+            let is_due = match self.heap.peek() {
+                Some(Reverse(e)) => e.scheduled_for.with_timezone(&Utc) <= now,
+                None => false,
+            };
+            if !is_due {
+                break;
+            }
+            let Reverse(entry) = self.heap.pop().expect("peeked a due entry");
+            due.push(DueRun {
+                job: entry.job.clone(),
+                occurrence_key: entry.key.clone(),
+                scheduled_for: entry.scheduled_for.with_timezone(&Utc),
+            });
+            let job_id = entry.job.id.as_deref().unwrap_or("");
+            let tz = resolve_timezone(entry.job.timezone.as_deref());
+            if let Some(occ) =
+                next_occurrence(job_id, &entry.job.schedule, tz, now.with_timezone(&tz))
+            {
+                self.heap.push(Reverse(Entry {
+                    scheduled_for: occ.scheduled_for,
+                    key: occ.key,
+                    job: entry.job,
+                }));
+            }
+        }
+        due
+    }
+}
+
+#[cfg(test)]
+mod schedule_table_tests {
+    use super::*;
+    use crate::config::{MissedRunPolicy, OverlapPolicy};
+    use chrono::Utc;
+
+    fn job(id: &str, every_minutes: u32, enabled: bool) -> EffectiveJob {
+        EffectiveJob {
+            id: Some(id.into()),
+            title: None,
+            enabled,
+            schedule: NormalizedSchedule::MinuteAligned { every_minutes },
+            command: "true".into(),
+            args: vec![],
+            cwd: None,
+            timeout_secs: None,
+            timezone: Some("UTC".into()),
+            overlap_policy: OverlapPolicy::Skip,
+            missed_run_policy: MissedRunPolicy::Skip,
+            max_retries: 0,
+            tags: vec![],
+        }
+    }
+
+    fn at(h: u32, m: u32, s: u32) -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 6, 21, h, m, s).unwrap()
+    }
+
+    fn cfg(jobs: Vec<EffectiveJob>) -> EffectiveConfig {
+        EffectiveConfig { version: 1, jobs }
+    }
+
+    #[test]
+    fn build_includes_only_enabled_keyed_jobs() {
+        let mut unkeyed = job("x", 15, true);
+        unkeyed.id = None;
+        let table = ScheduleTable::build(
+            &cfg(vec![job("a", 15, true), job("b", 15, false), unkeyed]),
+            at(10, 7, 0),
+        );
+        assert_eq!(
+            table.len(),
+            1,
+            "disabled and unkeyed jobs are not scheduled"
+        );
+    }
+
+    #[test]
+    fn next_wake_is_the_earliest_occurrence() {
+        // a every 15m -> 10:15, b every 5m -> 10:10; at 10:07 the earliest is 10:10.
+        let table = ScheduleTable::build(
+            &cfg(vec![job("a", 15, true), job("b", 5, true)]),
+            at(10, 7, 0),
+        );
+        assert_eq!(table.next_wake(), Some(at(10, 10, 0)));
+    }
+
+    #[test]
+    fn pop_due_fires_due_job_and_reschedules() {
+        let mut table = ScheduleTable::build(&cfg(vec![job("a", 15, true)]), at(10, 7, 0)); // next 10:15
+        assert!(table.pop_due(at(10, 14, 59)).is_empty(), "not due yet");
+        let due = table.pop_due(at(10, 15, 0));
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].scheduled_for, at(10, 15, 0));
+        assert_eq!(due[0].job.id.as_deref(), Some("a"));
+        assert_eq!(
+            table.next_wake(),
+            Some(at(10, 30, 0)),
+            "rescheduled to the next boundary"
+        );
+    }
+
+    #[test]
+    fn missed_occurrences_collapse_to_one_run() {
+        // Built at 10:00 -> next 10:15; clock jumps to 11:02 -> a single run, and the
+        // job reschedules past now to 11:15 (no backlog of 10:15/10:30/10:45/11:00).
+        let mut table = ScheduleTable::build(&cfg(vec![job("a", 15, true)]), at(10, 0, 0));
+        let due = table.pop_due(at(11, 2, 0));
+        assert_eq!(due.len(), 1, "missed occurrences collapse to a single run");
+        assert_eq!(table.next_wake(), Some(at(11, 15, 0)));
+    }
+
+    #[test]
+    fn due_run_carries_occurrence_key() {
+        let mut table = ScheduleTable::build(&cfg(vec![job("a", 15, true)]), at(10, 7, 0));
+        let due = table.pop_due(at(10, 15, 0));
+        assert!(
+            due[0].occurrence_key.starts_with("a:minute:"),
+            "got {}",
+            due[0].occurrence_key
+        );
+    }
 }
 
 #[cfg(test)]

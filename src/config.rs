@@ -130,7 +130,7 @@ pub(crate) fn parse_duration(s: &str) -> Result<u64, ()> {
 
 /// A schedule-complete, normalized schedule variant. Every schedule kind
 /// supported by the YAML schema has exactly one representation here.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 #[allow(dead_code)]
 pub(crate) enum NormalizedSchedule {
     /// `every: Nm` — fires every N minutes; N must be a divisor of 60.
@@ -177,7 +177,7 @@ pub(crate) enum MissedRunPolicy {
 
 /// Durable, schedule-complete representation of a single job. All optional raw
 /// fields have been resolved through the defaults-merge chain.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub(crate) struct EffectiveJob {
     /// Job id — may be None when the raw config omitted it.
