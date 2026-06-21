@@ -59,6 +59,25 @@ pub(crate) enum Command {
     Completion,
     /// Update periodic in place.
     SelfUpdate(SelfUpdateArgs),
+    /// Manage the daemon under the OS service manager.
+    #[command(subcommand)]
+    Service(ServiceCommand),
+}
+
+/// `periodic service …`: register the daemon with the per-user service manager
+/// (launchd on macOS, systemd --user on Linux).
+#[derive(Debug, Subcommand)]
+pub(crate) enum ServiceCommand {
+    /// Install and enable the service so the daemon runs at login.
+    Install,
+    /// Stop, disable, and remove the service.
+    Uninstall,
+    /// Start the installed service.
+    Start,
+    /// Stop the running service.
+    Stop,
+    /// Show the service's status.
+    Status,
 }
 
 /// `periodic self-update …`

@@ -32,6 +32,11 @@ is pre-1.0, minor versions (`0.x`) may carry breaking changes.
   history; `run_once` runs the most recent missed occurrence; `run_all` runs each.
   Occurrence-key dedupe means a run that already completed is never repeated.
 
+- `periodic service install | uninstall | start | stop | status` — run the daemon
+  under the per-user service manager (launchd on macOS, `systemd --user` on Linux)
+  so it starts at login and restarts on failure. `install` registers a unit that
+  runs `periodic daemon start --foreground`; the other subcommands drive it.
+
 ### Changed
 
 - `periodic doctor` now also reports daemon liveness — `not running`, `running

@@ -11,6 +11,7 @@ mod logs;
 mod output;
 mod scheduler;
 mod self_update;
+mod service;
 mod state;
 mod util;
 mod validation;
@@ -43,6 +44,7 @@ fn dispatch(cli: cli::Cli) -> anyhow::Result<ExitCode> {
             self_update::run(args.next, args.tag).map(|()| ExitCode::SUCCESS)
         }
         Command::Daemon(cmd) => daemon::run(cmd),
+        Command::Service(cmd) => service::run(cmd),
         Command::Jobs(cmd) => run_jobs(cmd),
         Command::Logs(args) => run_logs(&args),
         Command::Reload => unimplemented("reload"),
