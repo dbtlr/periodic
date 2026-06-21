@@ -19,6 +19,9 @@ is pre-1.0, minor versions (`0.x`) may carry breaking changes.
 - Observed runtime state is now persisted in a SQLite database at
   `~/.local/state/periodic/periodic.db`, created on first use (bundled SQLite, no
   system dependency). This is the first command to surface jobs' next-run times.
+- `periodic doctor` — read-only health check of the state database, reporting its
+  path and schema version (not-yet-created, healthy, pending upgrade, or newer
+  than this build). Daemon and crash-recovery checks arrive with the daemon.
 
 ## v0.2.0 - 2026-06-18
 

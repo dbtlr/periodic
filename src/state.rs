@@ -211,6 +211,39 @@ fn schedule_kind(schedule: &NormalizedSchedule) -> &'static str {
     }
 }
 
+// ─── health inspection (read-only) ───────────────────────────────────────────
+
+/// A read-only snapshot of the state database's health, for `periodic doctor`.
+/// `schema_version` is `None` when the database has not been created yet.
+#[derive(Debug, PartialEq)]
+pub(crate) struct DbHealth {
+    pub(crate) path: String,
+    pub(crate) schema_version: Option<i64>,
+    pub(crate) expected_version: i64,
+}
+
+/// Inspect the state database without mutating it. Unlike [`open`], this never
+/// creates the file or runs migrations — a missing database reports
+/// `schema_version: None` rather than being initialized as a side effect.
+pub(crate) fn inspect(path: &Path) -> Result<DbHealth> {
+    let expected_version = MIGRATIONS.len() as i64;
+    let path_display = path.display().to_string();
+    if !path.exists() {
+        return Ok(DbHealth {
+            path: path_display,
+            schema_version: None,
+            expected_version,
+        });
+    }
+    let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let schema_version: i64 = conn.query_row("pragma user_version", [], |r| r.get(0))?;
+    Ok(DbHealth {
+        path: path_display,
+        schema_version: Some(schema_version),
+        expected_version,
+    })
+}
+
 // ─── jobs_state reads ────────────────────────────────────────────────────────
 
 /// A `jobs_state` row as surfaced by the read commands. Serializes to the frozen
@@ -633,6 +666,35 @@ mod read_tests {
     fn get_returns_none_for_unknown_job() {
         let (_dir, conn) = seeded();
         assert!(get_job_state(&conn, "nope").unwrap().is_none());
+    }
+
+    #[test]
+    fn inspect_reports_not_created_for_missing_db() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("absent.db");
+        let health = inspect(&path).unwrap();
+        assert_eq!(health.schema_version, None);
+        assert!(health.expected_version >= 1);
+    }
+
+    #[test]
+    fn inspect_does_not_create_the_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("absent.db");
+        inspect(&path).unwrap();
+        assert!(
+            !path.exists(),
+            "inspect must be read-only and not create the db"
+        );
+    }
+
+    #[test]
+    fn inspect_reports_current_schema_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("periodic.db");
+        drop(open(&path).unwrap()); // create + migrate
+        let health = inspect(&path).unwrap();
+        assert_eq!(health.schema_version, Some(health.expected_version));
     }
 
     #[test]

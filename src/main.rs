@@ -45,7 +45,7 @@ fn dispatch(cli: cli::Cli) -> anyhow::Result<ExitCode> {
         Command::Jobs(cmd) => run_jobs(cmd),
         Command::Logs => unimplemented("logs"),
         Command::Reload => unimplemented("reload"),
-        Command::Doctor => unimplemented("doctor"),
+        Command::Doctor => doctor::run(),
         Command::Completion => unimplemented("completion"),
     }
 }
