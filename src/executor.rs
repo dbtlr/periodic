@@ -57,6 +57,7 @@ pub(crate) struct RunOutcome {
 }
 
 /// How a single attempt ended.
+#[derive(Clone, Copy)]
 #[allow(dead_code)]
 enum AttemptResult { Exited(i32), Timeout, Cancelled }
 
@@ -79,6 +80,8 @@ pub(crate) fn run_job(
     let attempt_id = format!("{run_id}-1");
     let result = run_attempt(conn, job, job_id, &run_id, &attempt_id, 1, &writer, now)?;
 
+    let run_finished = Utc::now();
+
     let (status, exit_code) = match result {
         AttemptResult::Exited(0) => (RunStatus::Success, Some(0)),
         AttemptResult::Exited(c) => (RunStatus::Failed, Some(c)),
@@ -86,10 +89,10 @@ pub(crate) fn run_job(
         AttemptResult::Cancelled => (RunStatus::Cancelled, None),
     };
 
-    finalize(conn, job_id, &run_id, status, exit_code, now)?;
+    finalize(conn, job_id, &run_id, status, exit_code, now, run_finished)?;
     Ok(RunOutcome {
         id: run_id, job_id: job_id.to_owned(), status,
-        started_at: now.to_rfc3339(), finished_at: now.to_rfc3339(),
+        started_at: now.to_rfc3339(), finished_at: run_finished.to_rfc3339(),
         exit_code, attempts: 1,
     })
 }
@@ -98,9 +101,10 @@ pub(crate) fn run_job(
 fn finalize(
     conn: &rusqlite::Connection, job_id: &str, run_id: &str,
     status: RunStatus, exit_code: Option<i32>, now: DateTime<Utc>,
+    run_finished: DateTime<Utc>,
 ) -> Result<()> {
-    state::finish_run(conn, run_id, status.as_str(), exit_code, None, now)?;
-    state::update_job_outcome(conn, job_id, run_id, status == RunStatus::Success, now)?;
+    state::finish_run(conn, run_id, status.as_str(), exit_code, None, run_finished)?;
+    state::update_job_outcome(conn, job_id, run_id, status == RunStatus::Success, run_finished)?;
     let kind = match status {
         RunStatus::Success => EventKind::RunSucceeded,
         RunStatus::Failed => EventKind::RunFailed,
@@ -132,8 +136,9 @@ fn run_attempt(
         Ok(c) => c,
         Err(e) => {
             // Spawn failure (e.g. command not found) is a failed attempt.
+            let spawn_failed_at = Utc::now();
             state::finish_attempt(conn, attempt_id, "failed", Some(127), None,
-                Some(&e.to_string()), now)?;
+                Some(&e.to_string()), spawn_failed_at)?;
             events::emit(conn, EventKind::AttemptFailed, job_id, run_id, Some(attempt_id),
                 &e.to_string(), now)?;
             return Ok(AttemptResult::Exited(127));
@@ -151,6 +156,7 @@ fn run_attempt(
     let waiter = thread::spawn(move || { let _ = tx.send(child.wait()); });
 
     let result = wait_loop(&rx, pid, job.timeout_secs);
+    let attempt_finished = Utc::now();
     let _ = waiter.join();
     let _ = t_out.join();
     let _ = t_err.join();
@@ -161,7 +167,7 @@ fn run_attempt(
         AttemptResult::Timeout => ("timeout", None, Some(15)),
         AttemptResult::Cancelled => ("cancelled", None, Some(15)),
     };
-    state::finish_attempt(conn, attempt_id, status, code, sig, None, now)?;
+    state::finish_attempt(conn, attempt_id, status, code, sig, None, attempt_finished)?;
     let ev = if matches!(result, AttemptResult::Exited(0)) {
         EventKind::AttemptSucceeded
     } else {
@@ -326,5 +332,21 @@ mod tests {
         let recs = crate::logs::read_logs(&logs, "echoer", Some(&out.id)).unwrap();
         assert!(recs.iter().any(|r| r.stream == "stdout" && r.text.contains("hi-there")),
             "captured stdout, got {recs:?}");
+    }
+
+    #[test]
+    fn spawn_failure_records_failed_run_and_attempt() {
+        let (dir, conn) = fixture();
+        seed(&conn, "nosuchbin");
+        let out = run_job(
+            &conn, &dir.path().join("logs"),
+            &job("nosuchbin", "periodic_no_such_command_xyz", &[]),
+            now(),
+        ).unwrap();
+        assert!(matches!(out.status, RunStatus::Failed),
+            "expected Failed, got {:?}", out.status);
+        let attempt_status: String = conn.query_row(
+            "select status from run_attempts where run_id=?1", [&out.id], |r| r.get(0)).unwrap();
+        assert_eq!(attempt_status, "failed");
     }
 }
