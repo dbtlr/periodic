@@ -232,21 +232,28 @@ fn schedule_kind(schedule: &NormalizedSchedule) -> &'static str {
 
 /// Insert a `pending` run row. Manual runs pass `trigger_type = "manual"` and a
 /// null `occurrence_key` (no scheduled-occurrence dedupe for manual triggers).
+/// Insert a `pending` run. `occurrence_key` deduplicates scheduled occurrences:
+/// a non-null key already present (daemon restart, config reload) is ignored and
+/// `Ok(false)` is returned — no second run. Manual triggers pass `None` (the unique
+/// index is partial, so null keys never dedupe) and always insert. Returns whether a
+/// new row was created.
 pub(crate) fn create_run(
     conn: &Connection,
     id: &str,
     job_id: &str,
     config_hash: &str,
     trigger_type: &str,
+    occurrence_key: Option<&str>,
     now: DateTime<Utc>,
-) -> Result<()> {
+) -> Result<bool> {
     let ts = now.to_rfc3339();
-    conn.execute(
-        "insert into runs (id, job_id, config_hash, trigger_type, status, created_at, updated_at)
-         values (?1, ?2, ?3, ?4, 'pending', ?5, ?5)",
-        rusqlite::params![id, job_id, config_hash, trigger_type, ts],
+    let n = conn.execute(
+        "insert into runs (id, job_id, config_hash, trigger_type, status, occurrence_key, created_at, updated_at)
+         values (?1, ?2, ?3, ?4, 'pending', ?5, ?6, ?6)
+         on conflict(occurrence_key) where occurrence_key is not null do nothing",
+        rusqlite::params![id, job_id, config_hash, trigger_type, occurrence_key, ts],
     )?;
-    Ok(())
+    Ok(n > 0)
 }
 
 /// Transition a run to `running`, stamping `started_at`.
@@ -641,6 +648,54 @@ mod tests {
     }
 
     #[test]
+    fn create_run_dedupes_on_occurrence_key() {
+        // The scheduler loop calls create_run per due occurrence; a repeat of the
+        // same occurrence_key (daemon restart, reload) must not create a second run.
+        use chrono::TimeZone;
+        let (_d, conn) = temp_db();
+        let now = Utc.timestamp_opt(1000, 0).unwrap();
+        let first = create_run(
+            &conn,
+            "r1",
+            "job",
+            "h",
+            "scheduled",
+            Some("job:minute:t"),
+            now,
+        )
+        .unwrap();
+        let second = create_run(
+            &conn,
+            "r2",
+            "job",
+            "h",
+            "scheduled",
+            Some("job:minute:t"),
+            now,
+        )
+        .unwrap();
+        assert!(first, "first scheduled occurrence inserts a run");
+        assert!(!second, "same occurrence_key must dedupe to no new row");
+        let n: i64 = conn
+            .query_row("select count(*) from runs", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn create_run_with_null_key_never_dedupes() {
+        use chrono::TimeZone;
+        let (_d, conn) = temp_db();
+        let now = Utc.timestamp_opt(1000, 0).unwrap();
+        assert!(create_run(&conn, "r1", "job", "h", "manual", None, now).unwrap());
+        assert!(create_run(&conn, "r2", "job", "h", "manual", None, now).unwrap());
+        let n: i64 = conn
+            .query_row("select count(*) from runs", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 2);
+    }
+
+    #[test]
     fn deleting_a_run_cascades_to_its_attempts() {
         let (_dir, conn) = temp_db();
         insert_run(&conn, "run-1", None).unwrap();
@@ -992,7 +1047,7 @@ mod run_writer_tests {
     #[test]
     fn create_run_inserts_pending_manual_run() {
         let (_d, conn) = temp_db();
-        create_run(&conn, "r1", "cleanup", "h", "manual", at(1000)).unwrap();
+        create_run(&conn, "r1", "cleanup", "h", "manual", None, at(1000)).unwrap();
         let (status, trig): (String, String) = conn
             .query_row(
                 "select status, trigger_type from runs where id='r1'",
@@ -1006,7 +1061,7 @@ mod run_writer_tests {
     #[test]
     fn finish_run_records_status_and_exit_code() {
         let (_d, conn) = temp_db();
-        create_run(&conn, "r1", "cleanup", "h", "manual", at(1000)).unwrap();
+        create_run(&conn, "r1", "cleanup", "h", "manual", None, at(1000)).unwrap();
         mark_run_running(&conn, "r1", at(1001)).unwrap();
         finish_run(&conn, "r1", "failed", Some(2), None, at(1005)).unwrap();
         let (status, code, started, finished): (
@@ -1029,7 +1084,7 @@ mod run_writer_tests {
     #[test]
     fn attempts_record_number_and_status() {
         let (_d, conn) = temp_db();
-        create_run(&conn, "r1", "cleanup", "h", "manual", at(1000)).unwrap();
+        create_run(&conn, "r1", "cleanup", "h", "manual", None, at(1000)).unwrap();
         start_attempt(&conn, "a1", "r1", 1, Some(4242), at(1001)).unwrap();
         finish_attempt(&conn, "a1", "failed", Some(1), None, None, at(1002)).unwrap();
         start_attempt(&conn, "a2", "r1", 2, Some(4243), at(1003)).unwrap();
@@ -1106,7 +1161,7 @@ mod run_writer_tests {
     #[test]
     fn start_attempt_pid_updates_pid_on_started_attempt() {
         let (_d, conn) = temp_db();
-        create_run(&conn, "r1", "cleanup", "h", "manual", at(1000)).unwrap();
+        create_run(&conn, "r1", "cleanup", "h", "manual", None, at(1000)).unwrap();
         start_attempt(&conn, "a1", "r1", 1, None, at(1001)).unwrap();
         start_attempt_pid(&conn, "a1", 4242).unwrap();
         let pid: Option<i64> = conn
@@ -1120,12 +1175,12 @@ mod run_writer_tests {
     #[test]
     fn list_runs_returns_recent_first_with_attempt_count() {
         let (_d, conn) = temp_db();
-        create_run(&conn, "r1", "cleanup", "h", "manual", at(1000)).unwrap();
+        create_run(&conn, "r1", "cleanup", "h", "manual", None, at(1000)).unwrap();
         mark_run_running(&conn, "r1", at(1000)).unwrap();
         start_attempt(&conn, "a1", "r1", 1, None, at(1000)).unwrap();
         finish_attempt(&conn, "a1", "success", Some(0), None, None, at(1001)).unwrap();
         finish_run(&conn, "r1", "success", Some(0), None, at(1001)).unwrap();
-        create_run(&conn, "r2", "cleanup", "h", "manual", at(2000)).unwrap();
+        create_run(&conn, "r2", "cleanup", "h", "manual", None, at(2000)).unwrap();
         mark_run_running(&conn, "r2", at(2000)).unwrap();
         finish_run(&conn, "r2", "failed", Some(1), None, at(2001)).unwrap();
 
@@ -1141,7 +1196,7 @@ mod run_writer_tests {
         let (_d, conn) = temp_db();
         for i in 0..5 {
             let id = format!("r{i}");
-            create_run(&conn, &id, "cleanup", "h", "manual", at(1000 + i)).unwrap();
+            create_run(&conn, &id, "cleanup", "h", "manual", None, at(1000 + i)).unwrap();
             mark_run_running(&conn, &id, at(1000 + i)).unwrap();
         }
         assert_eq!(list_runs(&conn, "cleanup", 3).unwrap().len(), 3);
