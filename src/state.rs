@@ -4,7 +4,8 @@
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
+use serde::Serialize;
 
 use crate::config::{EffectiveConfig, NormalizedSchedule};
 use crate::error::{Error, Result};
@@ -97,7 +98,6 @@ const MIGRATIONS: &[&str] = &[
 ///
 /// Mirrors [`crate::cli::default_config_path`]'s `HOME`-relative resolution:
 /// observed state lives under the XDG state dir, separate from user config.
-#[allow(dead_code)] // consumed by the reconcile + read-surface commands (PDC-48/49/50)
 pub(crate) fn default_db_path() -> PathBuf {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
@@ -108,7 +108,6 @@ pub(crate) fn default_db_path() -> PathBuf {
 /// Open (creating if absent) the state database at `path`, applying connection
 /// pragmas and running any pending migrations. The parent directory is created
 /// if it does not yet exist.
-#[allow(dead_code)] // consumed by the reconcile + read-surface commands (PDC-48/49/50)
 pub(crate) fn open(path: &Path) -> Result<Connection> {
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
@@ -163,7 +162,6 @@ fn migrate(conn: &Connection) -> Result<()> {
 /// (`last_run_id`, `last_success_at`, `last_failure_at`, `consecutive_failures`,
 /// `validation_error`) owned by the executor (0.5) and daemon (0.6). Jobs
 /// without an id are skipped. Returns the number of rows projected.
-#[allow(dead_code)] // consumed by the list/status read-surface command (PDC-49)
 pub(crate) fn reconcile(
     conn: &Connection,
     config: &EffectiveConfig,
@@ -211,6 +209,54 @@ fn schedule_kind(schedule: &NormalizedSchedule) -> &'static str {
         NormalizedSchedule::Calendar { .. } => "calendar",
         NormalizedSchedule::Cron { .. } => "cron",
     }
+}
+
+// ─── jobs_state reads ────────────────────────────────────────────────────────
+
+/// A `jobs_state` row as surfaced by the read commands. Serializes to the frozen
+/// `--format json` job shape (decision 0002); `job_id` is exposed as `id`.
+#[derive(Debug, Serialize, PartialEq)]
+pub(crate) struct JobStateRow {
+    #[serde(rename = "id")]
+    pub(crate) job_id: String,
+    pub(crate) state: String,
+    pub(crate) schedule_kind: String,
+    pub(crate) next_run_at: Option<String>,
+    pub(crate) config_hash: String,
+    pub(crate) updated_at: String,
+}
+
+const JOB_STATE_COLUMNS: &str =
+    "job_id, state, schedule_kind, next_run_at, config_hash, updated_at";
+
+fn row_to_job_state(row: &rusqlite::Row) -> rusqlite::Result<JobStateRow> {
+    Ok(JobStateRow {
+        job_id: row.get(0)?,
+        state: row.get(1)?,
+        schedule_kind: row.get(2)?,
+        next_run_at: row.get(3)?,
+        config_hash: row.get(4)?,
+        updated_at: row.get(5)?,
+    })
+}
+
+/// All job projections, ordered by id.
+pub(crate) fn list_job_states(conn: &Connection) -> Result<Vec<JobStateRow>> {
+    let sql = format!("select {JOB_STATE_COLUMNS} from jobs_state order by job_id");
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt
+        .query_map([], row_to_job_state)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// One job's projection, or `None` if the id is not present.
+pub(crate) fn get_job_state(conn: &Connection, job_id: &str) -> Result<Option<JobStateRow>> {
+    let sql = format!("select {JOB_STATE_COLUMNS} from jobs_state where job_id = ?1");
+    let row = conn
+        .query_row(&sql, [job_id], row_to_job_state)
+        .optional()?;
+    Ok(row)
 }
 
 #[cfg(test)]
@@ -529,5 +575,78 @@ mod reconcile_tests {
             .query_row("select count(*) from jobs_state", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, 0);
+    }
+}
+
+#[cfg(test)]
+mod read_tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    fn temp_db() -> (tempfile::TempDir, Connection) {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = open(&dir.path().join("periodic.db")).unwrap();
+        (dir, conn)
+    }
+
+    fn seeded() -> (tempfile::TempDir, Connection) {
+        let (dir, conn) = temp_db();
+        let cfg = crate::config::normalize(
+            &crate::config::parse(
+                "version: 1\njobs:\n  - id: beta\n    schedule: { every: 15m }\n    execution: { command: x }\n  - id: alpha\n    enabled: false\n    schedule: { every: day, at: \"09:00\" }\n    execution: { command: y }\n",
+            )
+            .unwrap(),
+        );
+        let now = Utc.with_ymd_and_hms(2026, 6, 20, 9, 0, 0).unwrap();
+        reconcile(&conn, &cfg, now).unwrap();
+        (dir, conn)
+    }
+
+    #[test]
+    fn list_returns_rows_ordered_by_id() {
+        let (_dir, conn) = seeded();
+        let rows = list_job_states(&conn).unwrap();
+        let ids: Vec<&str> = rows.iter().map(|r| r.job_id.as_str()).collect();
+        assert_eq!(ids, ["alpha", "beta"]);
+    }
+
+    #[test]
+    fn list_carries_projected_fields() {
+        let (_dir, conn) = seeded();
+        let rows = list_job_states(&conn).unwrap();
+        let beta = rows.iter().find(|r| r.job_id == "beta").unwrap();
+        assert_eq!(beta.state, "active");
+        assert_eq!(beta.schedule_kind, "minute");
+        assert!(beta.next_run_at.is_some());
+    }
+
+    #[test]
+    fn get_returns_the_requested_job() {
+        let (_dir, conn) = seeded();
+        let row = get_job_state(&conn, "alpha").unwrap().unwrap();
+        assert_eq!(row.job_id, "alpha");
+        assert_eq!(row.state, "disabled");
+        assert!(row.next_run_at.is_none());
+    }
+
+    #[test]
+    fn get_returns_none_for_unknown_job() {
+        let (_dir, conn) = seeded();
+        assert!(get_job_state(&conn, "nope").unwrap().is_none());
+    }
+
+    #[test]
+    fn job_state_serializes_id_field() {
+        let row = JobStateRow {
+            job_id: "cleanup".to_owned(),
+            state: "active".to_owned(),
+            schedule_kind: "calendar".to_owned(),
+            next_run_at: Some("2026-06-21T09:00:00-04:00".to_owned()),
+            config_hash: "abc".to_owned(),
+            updated_at: "2026-06-20T09:00:00+00:00".to_owned(),
+        };
+        let json = serde_json::to_string(&row).unwrap();
+        assert!(json.contains("\"id\":\"cleanup\""), "got {json}");
+        assert!(!json.contains("job_id"), "job_id should serialize as id");
     }
 }

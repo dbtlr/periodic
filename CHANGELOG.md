@@ -7,6 +7,19 @@ is pre-1.0, minor versions (`0.x`) may carry breaking changes.
 
 ## [Unreleased]
 
+### Added
+
+- `periodic jobs list [--format human|json]` — list configured jobs with their
+  state (`active`/`disabled`), schedule kind, and next run time, computed live
+  from the schedule engine. The JSON form is the stable agent contract (decision
+  0002): `{ "jobs": [ { "id", "state", "schedule_kind", "next_run_at",
+  "config_hash", "updated_at" } ] }`.
+- `periodic jobs status <id> [--format human|json]` — show one job's projection
+  (`{ "job": { … } }` in JSON); exit `1` when the id is unknown.
+- Observed runtime state is now persisted in a SQLite database at
+  `~/.local/state/periodic/periodic.db`, created on first use (bundled SQLite, no
+  system dependency). This is the first command to surface jobs' next-run times.
+
 ## v0.2.0 - 2026-06-18
 
 The `0.2` increment — config and validation. periodic's first user-facing

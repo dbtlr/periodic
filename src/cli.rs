@@ -89,9 +89,9 @@ pub(crate) enum JobsCommand {
     /// Add a job.
     Add,
     /// List jobs.
-    List,
+    List(JobsListArgs),
     /// Show one job's status.
-    Status,
+    Status(JobsStatusArgs),
     /// Run a job now.
     Run,
     /// Pause a job.
@@ -104,6 +104,24 @@ pub(crate) enum JobsCommand {
     Edit,
     /// Show a job's run history.
     History,
+}
+
+/// Arguments for `periodic jobs list`.
+#[derive(Debug, Args)]
+pub(crate) struct JobsListArgs {
+    /// Output format.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+    pub(crate) format: OutputFormat,
+}
+
+/// Arguments for `periodic jobs status <id>`.
+#[derive(Debug, Args)]
+pub(crate) struct JobsStatusArgs {
+    /// Job id to show.
+    pub(crate) id: String,
+    /// Output format.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+    pub(crate) format: OutputFormat,
 }
 
 /// Arguments for `periodic validate`.

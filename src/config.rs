@@ -400,7 +400,6 @@ fn parse_missed_run_policy(s: Option<&str>) -> MissedRunPolicy {
 /// (`title`, `tags`) and the job's identity (`id`) are excluded. This is the
 /// per-job config identity used to correlate a run with the config that produced
 /// it, and the projection identity stored in `jobs_state`.
-#[allow(dead_code)] // consumed by the jobs_state reconcile (PDC-48)
 pub(crate) fn job_config_hash(job: &EffectiveJob) -> String {
     use sha2::{Digest, Sha256};
     let digest = Sha256::digest(canonical_job(job).as_bytes());
