@@ -92,6 +92,15 @@ const MIGRATIONS: &[&str] = &[
     create index idx_events_job_created on events(job_id, created_at desc);
     create index idx_events_run_created on events(run_id, created_at desc);
     ",
+    // 0002 — phase 0.5 executor. Output is a daily JSONL keyed by line fields
+    // (job_id/run_id), not a path per attempt, so the per-attempt path columns
+    // from 0001 are wrong-granularity. `run_attempts` has no writer before this
+    // phase, so dropping them loses no data. New migration (not a 0001 edit):
+    // released 0.4 DBs are already at user_version = 1.
+    "
+    alter table run_attempts drop column stdout_path;
+    alter table run_attempts drop column stderr_path;
+    ",
 ];
 
 /// Default on-disk location of the runtime state database.
@@ -435,6 +444,27 @@ mod tests {
             remaining, 0,
             "attempts should cascade-delete with their run"
         );
+    }
+
+    #[test]
+    fn migration_0002_drops_attempt_path_columns() {
+        let (_dir, conn) = temp_db();
+        let cols: Vec<String> = conn
+            .prepare("select name from pragma_table_info('run_attempts')")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert!(!cols.contains(&"stdout_path".to_string()), "stdout_path should be dropped");
+        assert!(!cols.contains(&"stderr_path".to_string()), "stderr_path should be dropped");
+    }
+
+    #[test]
+    fn user_version_is_two_after_migrations() {
+        let (_dir, conn) = temp_db();
+        let v: i64 = conn.query_row("pragma user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(v, 2);
     }
 }
 
