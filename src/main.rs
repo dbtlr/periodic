@@ -7,6 +7,7 @@ mod error;
 mod events;
 mod executor;
 mod ipc;
+mod logs;
 mod output;
 mod scheduler;
 mod self_update;
