@@ -7,6 +7,27 @@ is pre-1.0, minor versions (`0.x`) may carry breaking changes.
 
 ## [Unreleased]
 
+### Added
+
+- `periodic jobs run <id>` — execute a job now, in the foreground, recording the
+  run. Exit `0` success · `1` failed/timeout/cancelled · `2` usage/invalid. The job
+  runs in its own process group; Ctrl-C and timeouts terminate the whole tree
+  (SIGTERM, then SIGKILL after a grace period). `--format json` emits
+  `{ "run": { … } }`. Disabled jobs run on explicit manual trigger; invalid jobs
+  are refused.
+- `periodic jobs history <id> [--limit N] [--format json]` — list a job's recorded
+  runs, most recent first. JSON: `{ "runs": [ … ] }`.
+- `periodic logs <id> [--run <id>] [--format json]` — show captured stdout/stderr
+  for a job (or a single run), read from per-day JSONL files under
+  `~/.local/state/periodic/logs/`.
+- Executor: honors `timeout` (terminal) and `retry.max_retries` (immediate retry on
+  non-zero exit); writes `runs` / `run_attempts` / lifecycle `events`.
+
+### Changed
+
+- State schema migration `0002` drops the unused per-attempt `stdout_path` /
+  `stderr_path` columns; run output now lives in per-day JSONL log files.
+
 ## v0.4.0 - 2026-06-21
 
 The `0.4` increment — runtime state. periodic now persists observed state in a

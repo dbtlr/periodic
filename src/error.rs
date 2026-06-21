@@ -17,6 +17,9 @@ pub(crate) enum Error {
 
     #[error("state database error: {0}")]
     Sqlite(#[from] rusqlite::Error),
+
+    #[error("log I/O error: {0}")]
+    Io(std::io::Error),
 }
 
 pub(crate) type Result<T> = std::result::Result<T, Error>;

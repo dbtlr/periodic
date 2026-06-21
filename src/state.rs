@@ -92,6 +92,15 @@ const MIGRATIONS: &[&str] = &[
     create index idx_events_job_created on events(job_id, created_at desc);
     create index idx_events_run_created on events(run_id, created_at desc);
     ",
+    // 0002 — phase 0.5 executor. Output is a daily JSONL keyed by line fields
+    // (job_id/run_id), not a path per attempt, so the per-attempt path columns
+    // from 0001 are wrong-granularity. `run_attempts` has no writer before this
+    // phase, so dropping them loses no data. New migration (not a 0001 edit):
+    // released 0.4 DBs are already at user_version = 1.
+    "
+    alter table run_attempts drop column stdout_path;
+    alter table run_attempts drop column stderr_path;
+    ",
 ];
 
 /// Default on-disk location of the runtime state database.
@@ -103,6 +112,14 @@ pub(crate) fn default_db_path() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_default();
     home.join(".local/state/periodic/periodic.db")
+}
+
+/// Default on-disk location of per-day run output logs.
+pub(crate) fn default_logs_dir() -> PathBuf {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_default();
+    home.join(".local/state/periodic/logs")
 }
 
 /// Open (creating if absent) the state database at `path`, applying connection
@@ -209,6 +226,176 @@ fn schedule_kind(schedule: &NormalizedSchedule) -> &'static str {
         NormalizedSchedule::Calendar { .. } => "calendar",
         NormalizedSchedule::Cron { .. } => "cron",
     }
+}
+
+// ─── run / attempt writers (executor, 0.5) ───────────────────────────────────
+
+/// Insert a `pending` run row. Manual runs pass `trigger_type = "manual"` and a
+/// null `occurrence_key` (no scheduled-occurrence dedupe for manual triggers).
+pub(crate) fn create_run(
+    conn: &Connection,
+    id: &str,
+    job_id: &str,
+    config_hash: &str,
+    trigger_type: &str,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    let ts = now.to_rfc3339();
+    conn.execute(
+        "insert into runs (id, job_id, config_hash, trigger_type, status, created_at, updated_at)
+         values (?1, ?2, ?3, ?4, 'pending', ?5, ?5)",
+        rusqlite::params![id, job_id, config_hash, trigger_type, ts],
+    )?;
+    Ok(())
+}
+
+/// Transition a run to `running`, stamping `started_at`.
+pub(crate) fn mark_run_running(conn: &Connection, id: &str, now: DateTime<Utc>) -> Result<()> {
+    let ts = now.to_rfc3339();
+    conn.execute(
+        "update runs set status='running', started_at=?2, updated_at=?2 where id=?1",
+        rusqlite::params![id, ts],
+    )?;
+    Ok(())
+}
+
+/// Terminal run update: status + optional exit code / error message + `finished_at`.
+pub(crate) fn finish_run(
+    conn: &Connection,
+    id: &str,
+    status: &str,
+    exit_code: Option<i32>,
+    error: Option<&str>,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    let ts = now.to_rfc3339();
+    conn.execute(
+        "update runs set status=?2, exit_code=?3, error=?4, finished_at=?5, updated_at=?5 where id=?1",
+        rusqlite::params![id, status, exit_code.map(i64::from), error, ts],
+    )?;
+    Ok(())
+}
+
+/// Insert a `running` attempt row.
+pub(crate) fn start_attempt(
+    conn: &Connection,
+    id: &str,
+    run_id: &str,
+    attempt_number: i64,
+    pid: Option<i32>,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    let ts = now.to_rfc3339();
+    conn.execute(
+        "insert into run_attempts (id, run_id, attempt_number, status, pid, started_at, created_at, updated_at)
+         values (?1, ?2, ?3, 'running', ?4, ?5, ?5, ?5)",
+        rusqlite::params![id, run_id, attempt_number, pid.map(i64::from), ts],
+    )?;
+    Ok(())
+}
+
+/// Record the OS pid on an already-started attempt (known only post-spawn).
+pub(crate) fn start_attempt_pid(conn: &Connection, id: &str, pid: i32) -> Result<()> {
+    conn.execute(
+        "update run_attempts set pid=?2 where id=?1",
+        rusqlite::params![id, i64::from(pid)],
+    )?;
+    Ok(())
+}
+
+/// Terminal attempt update.
+pub(crate) fn finish_attempt(
+    conn: &Connection,
+    id: &str,
+    status: &str,
+    exit_code: Option<i32>,
+    signal: Option<i32>,
+    error: Option<&str>,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    let ts = now.to_rfc3339();
+    conn.execute(
+        "update run_attempts set status=?2, exit_code=?3, signal=?4, error=?5, finished_at=?6, updated_at=?6
+         where id=?1",
+        rusqlite::params![id, status, exit_code.map(i64::from), signal.map(i64::from), error, ts],
+    )?;
+    Ok(())
+}
+
+/// Update the executor-owned outcome columns on `jobs_state` after a run finishes.
+/// Success sets `last_success_at` and zeroes `consecutive_failures`; failure sets
+/// `last_failure_at` and increments the counter. Always records `last_run_id`.
+pub(crate) fn update_job_outcome(
+    conn: &Connection,
+    job_id: &str,
+    run_id: &str,
+    succeeded: bool,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    let ts = now.to_rfc3339();
+    if succeeded {
+        conn.execute(
+            "update jobs_state set last_run_id=?2, last_success_at=?3,
+                 consecutive_failures=0, updated_at=?3 where job_id=?1",
+            rusqlite::params![job_id, run_id, ts],
+        )?;
+    } else {
+        conn.execute(
+            "update jobs_state set last_run_id=?2, last_failure_at=?3,
+                 consecutive_failures=consecutive_failures+1, updated_at=?3 where job_id=?1",
+            rusqlite::params![job_id, run_id, ts],
+        )?;
+    }
+    Ok(())
+}
+
+/// Whether a job id is present in `jobs_state` (used by `jobs run`/`history`).
+pub(crate) fn job_exists(conn: &Connection, job_id: &str) -> Result<bool> {
+    let n: i64 = conn.query_row(
+        "select count(*) from jobs_state where job_id=?1",
+        [job_id],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+// ─── run history reads ───────────────────────────────────────────────────────
+
+/// A `runs` row as surfaced by `jobs history`. `attempts` is the count of
+/// `run_attempts` for the run. Serializes to the frozen JSON run shape (0002).
+#[derive(Debug, Serialize, PartialEq)]
+pub(crate) struct RunRow {
+    pub(crate) id: String,
+    pub(crate) status: String,
+    pub(crate) trigger_type: String,
+    pub(crate) started_at: Option<String>,
+    pub(crate) finished_at: Option<String>,
+    pub(crate) exit_code: Option<i64>,
+    pub(crate) attempts: i64,
+}
+
+/// Runs for a job, most recent first (by `created_at`), capped at `limit`.
+pub(crate) fn list_runs(conn: &Connection, job_id: &str, limit: i64) -> Result<Vec<RunRow>> {
+    let mut stmt = conn.prepare(
+        "select r.id, r.status, r.trigger_type, r.started_at, r.finished_at, r.exit_code,
+                (select count(*) from run_attempts a where a.run_id = r.id) as attempts
+         from runs r where r.job_id = ?1
+         order by r.created_at desc, r.id desc limit ?2",
+    )?;
+    let rows = stmt
+        .query_map(rusqlite::params![job_id, limit], |row| {
+            Ok(RunRow {
+                id: row.get(0)?,
+                status: row.get(1)?,
+                trigger_type: row.get(2)?,
+                started_at: row.get(3)?,
+                finished_at: row.get(4)?,
+                exit_code: row.get(5)?,
+                attempts: row.get(6)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
 }
 
 // ─── health inspection (read-only) ───────────────────────────────────────────
@@ -435,6 +622,35 @@ mod tests {
             remaining, 0,
             "attempts should cascade-delete with their run"
         );
+    }
+
+    #[test]
+    fn migration_0002_drops_attempt_path_columns() {
+        let (_dir, conn) = temp_db();
+        let cols: Vec<String> = conn
+            .prepare("select name from pragma_table_info('run_attempts')")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert!(
+            !cols.contains(&"stdout_path".to_string()),
+            "stdout_path should be dropped"
+        );
+        assert!(
+            !cols.contains(&"stderr_path".to_string()),
+            "stderr_path should be dropped"
+        );
+    }
+
+    #[test]
+    fn user_version_is_two_after_migrations() {
+        let (_dir, conn) = temp_db();
+        let v: i64 = conn
+            .query_row("pragma user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, 2);
     }
 }
 
@@ -710,5 +926,187 @@ mod read_tests {
         let json = serde_json::to_string(&row).unwrap();
         assert!(json.contains("\"id\":\"cleanup\""), "got {json}");
         assert!(!json.contains("job_id"), "job_id should serialize as id");
+    }
+}
+
+#[cfg(test)]
+mod run_writer_tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    fn temp_db() -> (tempfile::TempDir, Connection) {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = open(&dir.path().join("periodic.db")).unwrap();
+        (dir, conn)
+    }
+    fn at(s: i64) -> DateTime<Utc> {
+        Utc.timestamp_opt(s, 0).unwrap()
+    }
+
+    fn seed_job(conn: &Connection) {
+        conn.execute(
+            "insert into jobs_state (job_id, state, config_hash, schedule_kind, updated_at)
+             values ('cleanup', 'active', 'h', 'minute', '2026-06-20T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn create_run_inserts_pending_manual_run() {
+        let (_d, conn) = temp_db();
+        create_run(&conn, "r1", "cleanup", "h", "manual", at(1000)).unwrap();
+        let (status, trig): (String, String) = conn
+            .query_row(
+                "select status, trigger_type from runs where id='r1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((status.as_str(), trig.as_str()), ("pending", "manual"));
+    }
+
+    #[test]
+    fn finish_run_records_status_and_exit_code() {
+        let (_d, conn) = temp_db();
+        create_run(&conn, "r1", "cleanup", "h", "manual", at(1000)).unwrap();
+        mark_run_running(&conn, "r1", at(1001)).unwrap();
+        finish_run(&conn, "r1", "failed", Some(2), None, at(1005)).unwrap();
+        let (status, code, started, finished): (
+            String,
+            Option<i64>,
+            Option<String>,
+            Option<String>,
+        ) = conn
+            .query_row(
+                "select status, exit_code, started_at, finished_at from runs where id='r1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "failed");
+        assert_eq!(code, Some(2));
+        assert!(started.is_some() && finished.is_some());
+    }
+
+    #[test]
+    fn attempts_record_number_and_status() {
+        let (_d, conn) = temp_db();
+        create_run(&conn, "r1", "cleanup", "h", "manual", at(1000)).unwrap();
+        start_attempt(&conn, "a1", "r1", 1, Some(4242), at(1001)).unwrap();
+        finish_attempt(&conn, "a1", "failed", Some(1), None, None, at(1002)).unwrap();
+        start_attempt(&conn, "a2", "r1", 2, Some(4243), at(1003)).unwrap();
+        finish_attempt(&conn, "a2", "success", Some(0), None, None, at(1004)).unwrap();
+        let n: i64 = conn
+            .query_row(
+                "select count(*) from run_attempts where run_id='r1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 2);
+
+        // Verify a1 column values
+        let (status, num, exit, finished): (String, i64, Option<i64>, Option<String>) = conn.query_row(
+            "select status, attempt_number, exit_code, finished_at from run_attempts where id='a1'",
+            [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        ).unwrap();
+        assert_eq!(status, "failed");
+        assert_eq!(num, 1);
+        assert_eq!(exit, Some(1));
+        assert!(finished.is_some());
+
+        // Verify a2 column values
+        let (status, num, exit, finished): (String, i64, Option<i64>, Option<String>) = conn.query_row(
+            "select status, attempt_number, exit_code, finished_at from run_attempts where id='a2'",
+            [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        ).unwrap();
+        assert_eq!(status, "success");
+        assert_eq!(num, 2);
+        assert_eq!(exit, Some(0));
+        assert!(finished.is_some());
+    }
+
+    #[test]
+    fn update_job_outcome_on_success_sets_last_success_and_clears_failures() {
+        let (_d, conn) = temp_db();
+        seed_job(&conn);
+        conn.execute(
+            "update jobs_state set consecutive_failures = 3 where job_id='cleanup'",
+            [],
+        )
+        .unwrap();
+        update_job_outcome(&conn, "cleanup", "r1", true, at(2000)).unwrap();
+        let (last_run, success_at, fails): (Option<String>, Option<String>, i64) = conn.query_row(
+            "select last_run_id, last_success_at, consecutive_failures from jobs_state where job_id='cleanup'",
+            [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap();
+        assert_eq!(last_run.as_deref(), Some("r1"));
+        assert!(success_at.is_some());
+        assert_eq!(fails, 0);
+    }
+
+    #[test]
+    fn update_job_outcome_on_failure_increments_failures() {
+        let (_d, conn) = temp_db();
+        seed_job(&conn);
+        update_job_outcome(&conn, "cleanup", "r1", false, at(2000)).unwrap();
+        update_job_outcome(&conn, "cleanup", "r2", false, at(2001)).unwrap();
+        let (fail_at, fails): (Option<String>, i64) = conn.query_row(
+            "select last_failure_at, consecutive_failures from jobs_state where job_id='cleanup'",
+            [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert!(fail_at.is_some());
+        assert_eq!(fails, 2);
+    }
+
+    #[test]
+    fn job_exists_reflects_jobs_state() {
+        let (_d, conn) = temp_db();
+        seed_job(&conn);
+        assert!(job_exists(&conn, "cleanup").unwrap());
+        assert!(!job_exists(&conn, "ghost").unwrap());
+    }
+
+    #[test]
+    fn start_attempt_pid_updates_pid_on_started_attempt() {
+        let (_d, conn) = temp_db();
+        create_run(&conn, "r1", "cleanup", "h", "manual", at(1000)).unwrap();
+        start_attempt(&conn, "a1", "r1", 1, None, at(1001)).unwrap();
+        start_attempt_pid(&conn, "a1", 4242).unwrap();
+        let pid: Option<i64> = conn
+            .query_row("select pid from run_attempts where id='a1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(pid, Some(4242));
+    }
+
+    #[test]
+    fn list_runs_returns_recent_first_with_attempt_count() {
+        let (_d, conn) = temp_db();
+        create_run(&conn, "r1", "cleanup", "h", "manual", at(1000)).unwrap();
+        mark_run_running(&conn, "r1", at(1000)).unwrap();
+        start_attempt(&conn, "a1", "r1", 1, None, at(1000)).unwrap();
+        finish_attempt(&conn, "a1", "success", Some(0), None, None, at(1001)).unwrap();
+        finish_run(&conn, "r1", "success", Some(0), None, at(1001)).unwrap();
+        create_run(&conn, "r2", "cleanup", "h", "manual", at(2000)).unwrap();
+        mark_run_running(&conn, "r2", at(2000)).unwrap();
+        finish_run(&conn, "r2", "failed", Some(1), None, at(2001)).unwrap();
+
+        let rows = list_runs(&conn, "cleanup", 10).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].id, "r2", "most recent first");
+        assert_eq!(rows[0].status, "failed");
+        assert_eq!(rows[1].attempts, 1);
+    }
+
+    #[test]
+    fn list_runs_honors_limit() {
+        let (_d, conn) = temp_db();
+        for i in 0..5 {
+            let id = format!("r{i}");
+            create_run(&conn, &id, "cleanup", "h", "manual", at(1000 + i)).unwrap();
+            mark_run_running(&conn, &id, at(1000 + i)).unwrap();
+        }
+        assert_eq!(list_runs(&conn, "cleanup", 3).unwrap().len(), 3);
     }
 }

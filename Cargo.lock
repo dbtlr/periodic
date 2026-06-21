@@ -1339,6 +1339,7 @@ dependencies = [
  "clap_mangen",
  "croner",
  "iana-time-zone",
+ "nix",
  "predicates",
  "rusqlite",
  "serde",

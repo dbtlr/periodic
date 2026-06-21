@@ -48,7 +48,7 @@ pub(crate) enum Command {
     #[command(subcommand)]
     Jobs(JobsCommand),
     /// Show job run logs.
-    Logs,
+    Logs(LogsArgs),
     /// Validate the configuration without applying it.
     Validate(ValidateArgs),
     /// Reload the configuration (validated).
@@ -93,7 +93,7 @@ pub(crate) enum JobsCommand {
     /// Show one job's status.
     Status(JobsStatusArgs),
     /// Run a job now.
-    Run,
+    Run(JobsRunArgs),
     /// Pause a job.
     Pause,
     /// Resume a paused job.
@@ -103,7 +103,7 @@ pub(crate) enum JobsCommand {
     /// Edit a job.
     Edit,
     /// Show a job's run history.
-    History,
+    History(JobsHistoryArgs),
 }
 
 /// Arguments for `periodic jobs list`.
@@ -120,6 +120,39 @@ pub(crate) struct JobsStatusArgs {
     /// Job id to show.
     pub(crate) id: String,
     /// Output format.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+    pub(crate) format: OutputFormat,
+}
+
+/// Arguments for `periodic jobs run <id>`.
+#[derive(Debug, Args)]
+pub(crate) struct JobsRunArgs {
+    /// Job id to run now.
+    pub(crate) id: String,
+    #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+    pub(crate) format: OutputFormat,
+}
+
+/// Arguments for `periodic jobs history <id>`.
+#[derive(Debug, Args)]
+pub(crate) struct JobsHistoryArgs {
+    /// Job id whose runs to show.
+    pub(crate) id: String,
+    /// Maximum number of runs to show (most recent first).
+    #[arg(long, default_value_t = 20)]
+    pub(crate) limit: i64,
+    #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+    pub(crate) format: OutputFormat,
+}
+
+/// Arguments for `periodic logs <id>`.
+#[derive(Debug, Args)]
+pub(crate) struct LogsArgs {
+    /// Job id whose output to show.
+    pub(crate) id: String,
+    /// Restrict to a single run.
+    #[arg(long, value_name = "RUN-ID")]
+    pub(crate) run: Option<String>,
     #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
     pub(crate) format: OutputFormat,
 }
