@@ -7,6 +7,13 @@ is pre-1.0, minor versions (`0.x`) may carry breaking changes.
 
 ## [Unreleased]
 
+## v0.6.0 - 2026-06-21
+
+The `0.6` increment — the daemon. periodic now runs as a long-lived scheduler: a
+`periodic daemon` process fires jobs on their wall-clock schedules in their own
+process groups, recovers cleanly from crashes, applies overlap and missed-run
+policies, reloads config live, and can be supervised by launchd / `systemd --user`.
+
 ### Added
 
 - `periodic daemon start [--foreground] [--detach]` — run the scheduler daemon. By
