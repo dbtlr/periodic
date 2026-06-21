@@ -26,6 +26,11 @@ is pre-1.0, minor versions (`0.x`) may carry breaking changes.
 - Overlap policy `skip` (the v1 default): when a scheduled occurrence fires while a
   prior run of the same job is still in flight, the daemon records it as a
   `skipped_overlap` run (visible in `jobs history`) instead of starting a second run.
+- Missed-run handling on startup, honoring each job's `missed_run_policy` for
+  occurrences that elapsed while the daemon was down (bounded to a 1-day lookback):
+  `skip` (default) records one collapsed `skipped` run so the miss is visible in
+  history; `run_once` runs the most recent missed occurrence; `run_all` runs each.
+  Occurrence-key dedupe means a run that already completed is never repeated.
 
 ### Changed
 
