@@ -47,7 +47,7 @@ fn dispatch(cli: cli::Cli) -> anyhow::Result<ExitCode> {
         Command::Service(cmd) => service::run(cmd),
         Command::Jobs(cmd) => run_jobs(cmd),
         Command::Logs(args) => run_logs(&args),
-        Command::Reload => unimplemented("reload"),
+        Command::Reload => run_reload(),
         Command::Doctor => doctor::run(),
         Command::Completion => unimplemented("completion"),
     }
@@ -236,6 +236,65 @@ fn run_logs(args: &cli::LogsArgs) -> anyhow::Result<ExitCode> {
     };
     print!("{rendered}");
     Ok(ExitCode::SUCCESS)
+}
+
+/// `periodic reload`: validate the config, then apply it dual-mode per the config
+/// mutation-ownership model. A running daemon owns the live schedule, so reload is
+/// requested over IPC (the daemon re-validates and atomically swaps its in-memory
+/// table, keeping last-known-good if the new config is invalid). When the daemon is
+/// stopped, the on-disk YAML is the source of truth, so validation is the whole job
+/// — the next `daemon start` reads it. Never asks a running daemon to load an
+/// invalid config: a config error exits 1 before any IPC.
+fn run_reload() -> anyhow::Result<ExitCode> {
+    let path = cli::default_config_path();
+    let display = path.display().to_string();
+    let yaml = std::fs::read_to_string(&path)
+        .map_err(|e| anyhow::anyhow!("cannot read {display}: {e}"))?;
+    let raw = match config::parse(&yaml) {
+        Ok(r) => r,
+        Err(d) => {
+            eprintln!("error: config invalid: {} ({})", d.message, d.path);
+            return Ok(ExitCode::from(1));
+        }
+    };
+    if validation::validate_config(&raw)
+        .iter()
+        .any(|d| d.is_error())
+    {
+        eprintln!("error: config invalid; run `periodic validate` for details");
+        return Ok(ExitCode::from(1));
+    }
+
+    let conn = state::open(&state::default_db_path())?;
+    let running = matches!(
+        state::read_daemon_status(&conn)?,
+        Some(s) if s.state == "running"
+    );
+    if !running {
+        println!("config valid; daemon not running (applied on next start)");
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    let mut client = ipc::Client::connect(&ipc::socket_path())
+        .map_err(|e| anyhow::anyhow!("cannot reach daemon (it may have crashed): {e}"))?;
+    let req = ipc::Request {
+        id: "reload".to_owned(),
+        method: "daemon.reload".to_owned(),
+        params: serde_json::json!({}),
+    };
+    match client
+        .call(&req)
+        .map_err(|e| anyhow::anyhow!("reload request failed: {e}"))?
+    {
+        ipc::Response::Ok { .. } => {
+            println!("reload requested");
+            Ok(ExitCode::SUCCESS)
+        }
+        ipc::Response::Err { error, .. } => {
+            eprintln!("error: daemon refused reload: {}", error.message);
+            Ok(ExitCode::from(1))
+        }
+    }
 }
 
 /// Forward terminal SIGINT to the executor: set CANCEL so the run's wait loop
