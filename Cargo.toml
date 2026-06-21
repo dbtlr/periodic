@@ -1,6 +1,6 @@
 [package]
 name = "periodic"
-version = "0.5.0"
+version = "0.6.0-next"
 edition = "2024"
 description = "A user-space recurring job scheduler for developer machines, devboxes, and lightweight infrastructure."
 repository = "https://github.com/dbtlr/periodic"
