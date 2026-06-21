@@ -498,6 +498,100 @@ pub(crate) fn get_job_state(conn: &Connection, job_id: &str) -> Result<Option<Jo
     Ok(row)
 }
 
+// ─── daemon_state (liveness / heartbeat) ─────────────────────────────────────
+// Writers + liveness substrate for the 0.6 daemon; wired into the run loop and
+// doctor/status / crash recovery by later phase-0.6 tasks (PDC-69+).
+
+/// The daemon's liveness snapshot, read from the `daemon_state` key-value table.
+#[allow(dead_code)]
+pub(crate) struct DaemonStatus {
+    pub(crate) pid: i32,
+    pub(crate) state: String, // "running" | "stopping" | "stopped"
+    pub(crate) heartbeat: DateTime<Utc>,
+}
+
+/// Upsert a single `daemon_state` key, overwriting any prior value/timestamp.
+#[allow(dead_code)]
+fn put_daemon_state(conn: &Connection, key: &str, value: &str, now: DateTime<Utc>) -> Result<()> {
+    let ts = now.to_rfc3339();
+    conn.execute(
+        "insert into daemon_state (key, value, updated_at) values (?1, ?2, ?3)
+         on conflict(key) do update set value=excluded.value, updated_at=excluded.updated_at",
+        rusqlite::params![key, value, ts],
+    )?;
+    Ok(())
+}
+
+/// Record daemon startup: upsert `pid`, `state`="running", and `heartbeat`=now.
+/// The upsert overwrites a prior daemon's row, so a restart re-claims liveness.
+#[allow(dead_code)]
+pub(crate) fn record_daemon_started(conn: &Connection, pid: i32, now: DateTime<Utc>) -> Result<()> {
+    put_daemon_state(conn, "pid", &pid.to_string(), now)?;
+    put_daemon_state(conn, "state", "running", now)?;
+    put_daemon_state(conn, "heartbeat", &now.to_rfc3339(), now)?;
+    Ok(())
+}
+
+/// Advance the `heartbeat` key to `now`. Called by the daemon on each tick.
+#[allow(dead_code)]
+pub(crate) fn record_daemon_heartbeat(conn: &Connection, now: DateTime<Utc>) -> Result<()> {
+    put_daemon_state(conn, "heartbeat", &now.to_rfc3339(), now)
+}
+
+/// Set the lifecycle `state` key (e.g. "stopping", "stopped").
+#[allow(dead_code)]
+pub(crate) fn record_daemon_state(
+    conn: &Connection,
+    state: &str,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    put_daemon_state(conn, "state", state, now)
+}
+
+/// Read the daemon's liveness snapshot, or `None` if it has never been started.
+#[allow(dead_code)]
+pub(crate) fn read_daemon_status(conn: &Connection) -> Result<Option<DaemonStatus>> {
+    let Some(pid_str) = read_daemon_key(conn, "pid")? else {
+        return Ok(None);
+    };
+    let pid: i32 = pid_str
+        .parse()
+        .map_err(|_| Error::NoRowUpdated(format!("daemon pid {pid_str:?}")))?;
+    let state = read_daemon_key(conn, "state")?.unwrap_or_default();
+    let heartbeat_str = read_daemon_key(conn, "heartbeat")?.unwrap_or_default();
+    let heartbeat = DateTime::parse_from_rfc3339(&heartbeat_str)
+        .map_err(|_| Error::NoRowUpdated(format!("daemon heartbeat {heartbeat_str:?}")))?
+        .with_timezone(&Utc);
+    Ok(Some(DaemonStatus {
+        pid,
+        state,
+        heartbeat,
+    }))
+}
+
+/// Fetch a single `daemon_state` value by key.
+fn read_daemon_key(conn: &Connection, key: &str) -> Result<Option<String>> {
+    let value = conn
+        .query_row(
+            "select value from daemon_state where key = ?1",
+            [key],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(value)
+}
+
+/// A daemon that claims "running" but whose heartbeat is older than `max_age` has
+/// almost certainly crashed. "stopping"/"stopped" are never stale.
+#[allow(dead_code)]
+pub(crate) fn daemon_is_stale(
+    status: &DaemonStatus,
+    now: DateTime<Utc>,
+    max_age: chrono::Duration,
+) -> bool {
+    status.state == "running" && now - status.heartbeat > max_age
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1200,5 +1294,105 @@ mod run_writer_tests {
             mark_run_running(&conn, &id, at(1000 + i)).unwrap();
         }
         assert_eq!(list_runs(&conn, "cleanup", 3).unwrap().len(), 3);
+    }
+}
+
+#[cfg(test)]
+mod daemon_state_tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    fn temp_db() -> (tempfile::TempDir, Connection) {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = open(&dir.path().join("periodic.db")).unwrap();
+        (dir, conn)
+    }
+    fn at(s: i64) -> DateTime<Utc> {
+        Utc.timestamp_opt(s, 0).unwrap()
+    }
+
+    #[test]
+    fn status_is_none_before_any_start() {
+        let (_d, conn) = temp_db();
+        assert!(read_daemon_status(&conn).unwrap().is_none());
+    }
+
+    #[test]
+    fn record_started_then_read_reports_running() {
+        let (_d, conn) = temp_db();
+        record_daemon_started(&conn, 4242, at(1000)).unwrap();
+        let status = read_daemon_status(&conn).unwrap().unwrap();
+        assert_eq!(status.pid, 4242);
+        assert_eq!(status.state, "running");
+        assert_eq!(status.heartbeat, at(1000));
+    }
+
+    #[test]
+    fn restart_overwrites_prior_daemon_row() {
+        let (_d, conn) = temp_db();
+        record_daemon_started(&conn, 1, at(1000)).unwrap();
+        record_daemon_started(&conn, 2, at(2000)).unwrap();
+        let status = read_daemon_status(&conn).unwrap().unwrap();
+        assert_eq!(status.pid, 2);
+        assert_eq!(status.state, "running");
+        assert_eq!(status.heartbeat, at(2000));
+    }
+
+    #[test]
+    fn heartbeat_advances_independently_of_state() {
+        let (_d, conn) = temp_db();
+        record_daemon_started(&conn, 7, at(1000)).unwrap();
+        record_daemon_heartbeat(&conn, at(1060)).unwrap();
+        record_daemon_heartbeat(&conn, at(1120)).unwrap();
+        let status = read_daemon_status(&conn).unwrap().unwrap();
+        assert_eq!(status.state, "running");
+        assert_eq!(status.heartbeat, at(1120));
+        assert_eq!(status.pid, 7);
+    }
+
+    #[test]
+    fn record_state_flips_state_and_leaves_heartbeat() {
+        let (_d, conn) = temp_db();
+        record_daemon_started(&conn, 7, at(1000)).unwrap();
+        record_daemon_heartbeat(&conn, at(1120)).unwrap();
+        record_daemon_state(&conn, "stopped", at(1130)).unwrap();
+        let status = read_daemon_status(&conn).unwrap().unwrap();
+        assert_eq!(status.state, "stopped");
+        // The heartbeat stays at the last tick, not the state-change time.
+        assert_eq!(status.heartbeat, at(1120));
+    }
+
+    #[test]
+    fn running_with_old_heartbeat_is_stale() {
+        let status = DaemonStatus {
+            pid: 1,
+            state: "running".to_owned(),
+            heartbeat: at(1000),
+        };
+        let max_age = chrono::Duration::seconds(60);
+        // now - heartbeat = 61s > 60s
+        assert!(daemon_is_stale(&status, at(1061), max_age));
+    }
+
+    #[test]
+    fn running_with_fresh_heartbeat_is_not_stale() {
+        let status = DaemonStatus {
+            pid: 1,
+            state: "running".to_owned(),
+            heartbeat: at(1000),
+        };
+        let max_age = chrono::Duration::seconds(60);
+        assert!(!daemon_is_stale(&status, at(1030), max_age));
+    }
+
+    #[test]
+    fn stopped_with_old_heartbeat_is_not_stale() {
+        let status = DaemonStatus {
+            pid: 1,
+            state: "stopped".to_owned(),
+            heartbeat: at(1000),
+        };
+        let max_age = chrono::Duration::seconds(60);
+        assert!(!daemon_is_stale(&status, at(9999), max_age));
     }
 }
