@@ -503,7 +503,6 @@ pub(crate) fn get_job_state(conn: &Connection, job_id: &str) -> Result<Option<Jo
 // doctor/status / crash recovery by later phase-0.6 tasks (PDC-69+).
 
 /// The daemon's liveness snapshot, read from the `daemon_state` key-value table.
-#[allow(dead_code)]
 pub(crate) struct DaemonStatus {
     pub(crate) pid: i32,
     pub(crate) state: String, // "running" | "stopping" | "stopped"
@@ -549,7 +548,6 @@ pub(crate) fn record_daemon_state(
 }
 
 /// Read the daemon's liveness snapshot, or `None` if it has never been started.
-#[allow(dead_code)]
 pub(crate) fn read_daemon_status(conn: &Connection) -> Result<Option<DaemonStatus>> {
     let Some(pid_str) = read_daemon_key(conn, "pid")? else {
         return Ok(None);
@@ -583,13 +581,34 @@ fn read_daemon_key(conn: &Connection, key: &str) -> Result<Option<String>> {
 
 /// A daemon that claims "running" but whose heartbeat is older than `max_age` has
 /// almost certainly crashed. "stopping"/"stopped" are never stale.
-#[allow(dead_code)]
 pub(crate) fn daemon_is_stale(
     status: &DaemonStatus,
     now: DateTime<Utc>,
     max_age: chrono::Duration,
 ) -> bool {
     status.state == "running" && now - status.heartbeat > max_age
+}
+
+// ─── crash recovery ──────────────────────────────────────────────────────────
+
+/// Reconcile non-terminal runs/attempts left by a crashed daemon to `interrupted`.
+/// Called once at daemon startup before the scheduler loop. Returns how many runs
+/// were interrupted.
+// Wired into the daemon startup path in PDC-74; tested but not yet called in non-test builds.
+#[allow(dead_code)]
+pub(crate) fn recover_interrupted_runs(conn: &Connection, now: DateTime<Utc>) -> Result<usize> {
+    let ts = now.to_rfc3339();
+    let runs = conn.execute(
+        "update runs set status='interrupted', finished_at=?1, updated_at=?1
+         where status in ('pending', 'running')",
+        rusqlite::params![ts],
+    )?;
+    conn.execute(
+        "update run_attempts set status='interrupted', finished_at=?1, updated_at=?1
+         where status='running'",
+        rusqlite::params![ts],
+    )?;
+    Ok(runs)
 }
 
 #[cfg(test)]
@@ -1294,6 +1313,132 @@ mod run_writer_tests {
             mark_run_running(&conn, &id, at(1000 + i)).unwrap();
         }
         assert_eq!(list_runs(&conn, "cleanup", 3).unwrap().len(), 3);
+    }
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use super::*;
+    use chrono::TimeZone;
+    use rusqlite::params;
+
+    fn temp_db() -> (tempfile::TempDir, Connection) {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = open(&dir.path().join("periodic.db")).unwrap();
+        (dir, conn)
+    }
+    fn at(s: i64) -> DateTime<Utc> {
+        Utc.timestamp_opt(s, 0).unwrap()
+    }
+
+    fn insert_run_with_status(conn: &Connection, id: &str, status: &str) {
+        conn.execute(
+            "insert into runs (id, job_id, config_hash, trigger_type, status, created_at, updated_at)
+             values (?, 'job', 'hash', 'scheduled', ?, '2026-06-20T00:00:00Z', '2026-06-20T00:00:00Z')",
+            params![id, status],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn running_run_and_attempt_become_interrupted() {
+        let (_d, conn) = temp_db();
+        insert_run_with_status(&conn, "r1", "running");
+        conn.execute(
+            "insert into run_attempts (id, run_id, attempt_number, status, started_at, created_at, updated_at)
+             values ('a1', 'r1', 1, 'running', '2026-06-20T00:00:00Z', '2026-06-20T00:00:00Z', '2026-06-20T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+
+        let n = recover_interrupted_runs(&conn, at(5000)).unwrap();
+        assert_eq!(n, 1, "one run should be recovered");
+
+        let (status, finished): (String, Option<String>) = conn
+            .query_row(
+                "select status, finished_at from runs where id='r1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "interrupted");
+        assert!(finished.is_some(), "finished_at must be stamped");
+
+        let (astatus, afinished): (String, Option<String>) = conn
+            .query_row(
+                "select status, finished_at from run_attempts where id='a1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(astatus, "interrupted");
+        assert!(afinished.is_some(), "attempt finished_at must be stamped");
+    }
+
+    #[test]
+    fn pending_run_becomes_interrupted() {
+        let (_d, conn) = temp_db();
+        insert_run_with_status(&conn, "r1", "pending");
+        let n = recover_interrupted_runs(&conn, at(5000)).unwrap();
+        assert_eq!(n, 1);
+        let status: String = conn
+            .query_row("select status from runs where id='r1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(status, "interrupted");
+    }
+
+    #[test]
+    fn terminal_runs_are_untouched() {
+        let (_d, conn) = temp_db();
+        insert_run_with_status(&conn, "ok", "success");
+        insert_run_with_status(&conn, "bad", "failed");
+        let n = recover_interrupted_runs(&conn, at(5000)).unwrap();
+        assert_eq!(n, 0, "terminal runs are not recovered");
+        let ok: String = conn
+            .query_row("select status from runs where id='ok'", [], |r| r.get(0))
+            .unwrap();
+        let bad: String = conn
+            .query_row("select status from runs where id='bad'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(ok, "success");
+        assert_eq!(bad, "failed");
+    }
+
+    #[test]
+    fn terminal_attempts_are_untouched() {
+        let (_d, conn) = temp_db();
+        insert_run_with_status(&conn, "r1", "success");
+        conn.execute(
+            "insert into run_attempts (id, run_id, attempt_number, status, created_at, updated_at)
+             values ('a1', 'r1', 1, 'success', '2026-06-20T00:00:00Z', '2026-06-20T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        recover_interrupted_runs(&conn, at(5000)).unwrap();
+        let astatus: String = conn
+            .query_row("select status from run_attempts where id='a1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(astatus, "success");
+    }
+
+    #[test]
+    fn clean_db_recovers_nothing() {
+        let (_d, conn) = temp_db();
+        let n = recover_interrupted_runs(&conn, at(5000)).unwrap();
+        assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn counts_multiple_stale_runs() {
+        let (_d, conn) = temp_db();
+        insert_run_with_status(&conn, "r1", "running");
+        insert_run_with_status(&conn, "r2", "pending");
+        insert_run_with_status(&conn, "r3", "running");
+        insert_run_with_status(&conn, "done", "success");
+        let n = recover_interrupted_runs(&conn, at(5000)).unwrap();
+        assert_eq!(n, 3, "all three non-terminal runs are counted");
     }
 }
 
