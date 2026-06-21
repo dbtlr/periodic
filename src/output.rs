@@ -195,7 +195,9 @@ pub(crate) fn render_run_human(out: &RunOutcome) -> String {
         .unwrap_or_else(|| "—".into());
     format!(
         "{glyph} {} {} (exit {code}, {} attempt(s))\n",
-        out.job_id, out.status.as_str(), out.attempts
+        out.job_id,
+        out.status.as_str(),
+        out.attempts
     )
 }
 
@@ -251,9 +253,15 @@ mod tests {
     #[test]
     fn run_json_wraps_in_run_key() {
         use crate::executor::{RunOutcome, RunStatus};
-        let out = RunOutcome { id: "r1".into(), job_id: "cleanup".into(), status: RunStatus::Success,
-            started_at: "2026-06-21T00:00:00+00:00".into(), finished_at: "2026-06-21T00:00:01+00:00".into(),
-            exit_code: Some(0), attempts: 1 };
+        let out = RunOutcome {
+            id: "r1".into(),
+            job_id: "cleanup".into(),
+            status: RunStatus::Success,
+            started_at: "2026-06-21T00:00:00+00:00".into(),
+            finished_at: "2026-06-21T00:00:01+00:00".into(),
+            exit_code: Some(0),
+            attempts: 1,
+        };
         let json = render_run_json(&out);
         assert!(json.contains("\"run\""));
         assert!(json.contains("\"status\": \"success\""));
@@ -263,9 +271,15 @@ mod tests {
     #[test]
     fn runs_json_wraps_in_runs_array() {
         use crate::state::RunRow;
-        let rows = vec![RunRow { id: "r1".into(), status: "failed".into(), trigger_type: "manual".into(),
+        let rows = vec![RunRow {
+            id: "r1".into(),
+            status: "failed".into(),
+            trigger_type: "manual".into(),
             started_at: Some("2026-06-21T00:00:00+00:00".into()),
-            finished_at: Some("2026-06-21T00:00:01+00:00".into()), exit_code: Some(1), attempts: 2 }];
+            finished_at: Some("2026-06-21T00:00:01+00:00".into()),
+            exit_code: Some(1),
+            attempts: 2,
+        }];
         let json = render_runs_json(&rows);
         assert!(json.contains("\"runs\""));
         assert!(json.contains("\"id\": \"r1\""));
@@ -274,8 +288,14 @@ mod tests {
     #[test]
     fn logs_human_renders_stream_lines() {
         use crate::logs::LogRecord;
-        let recs = vec![LogRecord { ts: "2026-06-21T00:00:00+00:00".into(), job_id: "c".into(),
-            run_id: "r1".into(), attempt: 1, stream: "stdout".into(), text: "hello".into() }];
+        let recs = vec![LogRecord {
+            ts: "2026-06-21T00:00:00+00:00".into(),
+            job_id: "c".into(),
+            run_id: "r1".into(),
+            attempt: 1,
+            stream: "stdout".into(),
+            text: "hello".into(),
+        }];
         assert!(render_logs_human(&recs).contains("hello"));
     }
 

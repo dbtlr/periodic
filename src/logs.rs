@@ -43,7 +43,8 @@ impl DailyLogWriter {
         if reopen {
             fs::create_dir_all(&self.dir)?;
             let file = OpenOptions::new()
-                .create(true).append(true)
+                .create(true)
+                .append(true)
                 .open(self.dir.join(format!("{date}.jsonl")))?;
             self.current = Some((date, file));
         }
@@ -58,7 +59,8 @@ impl DailyLogWriter {
 /// unparseable lines. A missing dir reads as empty.
 pub(crate) fn read_logs(dir: &Path, job_id: &str, run_id: Option<&str>) -> Result<Vec<LogRecord>> {
     let mut files: Vec<PathBuf> = match fs::read_dir(dir) {
-        Ok(rd) => rd.filter_map(|e| e.ok().map(|e| e.path()))
+        Ok(rd) => rd
+            .filter_map(|e| e.ok().map(|e| e.path()))
             .filter(|p| p.extension().is_some_and(|x| x == "jsonl"))
             .collect(),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -70,10 +72,20 @@ pub(crate) fn read_logs(dir: &Path, job_id: &str, run_id: Option<&str>) -> Resul
         let file = File::open(&path).map_err(Error::Io)?;
         for line in BufReader::new(file).lines() {
             let line = line.map_err(Error::Io)?;
-            if line.trim().is_empty() { continue; }
-            let Ok(rec) = serde_json::from_str::<LogRecord>(&line) else { continue; };
-            if rec.job_id != job_id { continue; }
-            if let Some(want) = run_id && rec.run_id != want { continue; }
+            if line.trim().is_empty() {
+                continue;
+            }
+            let Ok(rec) = serde_json::from_str::<LogRecord>(&line) else {
+                continue;
+            };
+            if rec.job_id != job_id {
+                continue;
+            }
+            if let Some(want) = run_id
+                && rec.run_id != want
+            {
+                continue;
+            }
             out.push(rec);
         }
     }
@@ -87,18 +99,30 @@ mod tests {
 
     fn rec(ts_secs: i64, job: &str, run: &str, stream: &str, text: &str) -> LogRecord {
         let ts = Utc.timestamp_opt(ts_secs, 0).unwrap().to_rfc3339();
-        LogRecord { ts, job_id: job.into(), run_id: run.into(), attempt: 1,
-            stream: stream.into(), text: text.into() }
+        LogRecord {
+            ts,
+            job_id: job.into(),
+            run_id: run.into(),
+            attempt: 1,
+            stream: stream.into(),
+            text: text.into(),
+        }
     }
 
     #[test]
     fn append_then_read_filters_by_job_and_run() {
         let dir = tempfile::tempdir().unwrap();
         let mut w = DailyLogWriter::new(dir.path().to_path_buf());
-        let day = Utc.with_ymd_and_hms(2026, 6, 20, 12, 0, 0).unwrap().timestamp();
-        w.append(&rec(day, "cleanup", "r1", "stdout", "hello")).unwrap();
-        w.append(&rec(day, "cleanup", "r2", "stderr", "other")).unwrap();
-        w.append(&rec(day, "backup", "r9", "stdout", "nope")).unwrap();
+        let day = Utc
+            .with_ymd_and_hms(2026, 6, 20, 12, 0, 0)
+            .unwrap()
+            .timestamp();
+        w.append(&rec(day, "cleanup", "r1", "stdout", "hello"))
+            .unwrap();
+        w.append(&rec(day, "cleanup", "r2", "stderr", "other"))
+            .unwrap();
+        w.append(&rec(day, "backup", "r9", "stdout", "nope"))
+            .unwrap();
 
         let all = read_logs(dir.path(), "cleanup", None).unwrap();
         assert_eq!(all.len(), 2);
@@ -111,8 +135,14 @@ mod tests {
     fn lines_land_in_file_for_their_own_day() {
         let dir = tempfile::tempdir().unwrap();
         let mut w = DailyLogWriter::new(dir.path().to_path_buf());
-        let d20 = Utc.with_ymd_and_hms(2026, 6, 20, 23, 59, 0).unwrap().timestamp();
-        let d21 = Utc.with_ymd_and_hms(2026, 6, 21, 0, 1, 0).unwrap().timestamp();
+        let d20 = Utc
+            .with_ymd_and_hms(2026, 6, 20, 23, 59, 0)
+            .unwrap()
+            .timestamp();
+        let d21 = Utc
+            .with_ymd_and_hms(2026, 6, 21, 0, 1, 0)
+            .unwrap()
+            .timestamp();
         w.append(&rec(d20, "j", "r", "stdout", "a")).unwrap();
         w.append(&rec(d21, "j", "r", "stdout", "b")).unwrap();
         assert!(dir.path().join("2026-06-20.jsonl").exists());
@@ -123,6 +153,10 @@ mod tests {
     #[test]
     fn read_logs_on_missing_dir_is_empty() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(read_logs(&dir.path().join("nope"), "x", None).unwrap().is_empty());
+        assert!(
+            read_logs(&dir.path().join("nope"), "x", None)
+                .unwrap()
+                .is_empty()
+        );
     }
 }

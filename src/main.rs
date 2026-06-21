@@ -166,12 +166,19 @@ fn run_jobs_run(args: &cli::JobsRunArgs) -> anyhow::Result<ExitCode> {
     let raw = config::parse(&yaml)
         .map_err(|d| anyhow::anyhow!("config invalid: {} ({})", d.message, d.path))?;
     // Invalid config → usage error (exit 2), no run row (spec §4).
-    if validation::validate_config(&raw).iter().any(|d| d.is_error()) {
+    if validation::validate_config(&raw)
+        .iter()
+        .any(|d| d.is_error())
+    {
         eprintln!("error: config invalid; run `periodic validate` for details");
         return Ok(ExitCode::from(2));
     }
     let effective = config::normalize(&raw);
-    let Some(job) = effective.jobs.iter().find(|j| j.id.as_deref() == Some(args.id.as_str())) else {
+    let Some(job) = effective
+        .jobs
+        .iter()
+        .find(|j| j.id.as_deref() == Some(args.id.as_str()))
+    else {
         eprintln!("error: no such job: {}", args.id);
         return Ok(ExitCode::from(2));
     };
@@ -221,13 +228,19 @@ fn run_logs(args: &cli::LogsArgs) -> anyhow::Result<ExitCode> {
 /// kills the child's process group instead of orphaning it.
 #[cfg(unix)]
 fn install_sigint_forwarder() {
-    use nix::sys::signal::{sigaction, SaFlags, SigAction, SigHandler, SigSet, Signal};
+    use nix::sys::signal::{SaFlags, SigAction, SigHandler, SigSet, Signal, sigaction};
     extern "C" fn handle(_sig: i32) {
         executor::CANCEL.store(true, std::sync::atomic::Ordering::SeqCst);
     }
-    let action = SigAction::new(SigHandler::Handler(handle), SaFlags::empty(), SigSet::empty());
+    let action = SigAction::new(
+        SigHandler::Handler(handle),
+        SaFlags::empty(),
+        SigSet::empty(),
+    );
     // SAFETY: the handler only stores to an AtomicBool (async-signal-safe).
-    unsafe { let _ = sigaction(Signal::SIGINT, &action); }
+    unsafe {
+        let _ = sigaction(Signal::SIGINT, &action);
+    }
 }
 
 #[cfg(not(unix))]

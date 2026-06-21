@@ -36,8 +36,10 @@ impl EventKind {
     /// Severity tag stored in `events.level`. Failures/timeouts are `error`.
     fn level(self) -> &'static str {
         match self {
-            EventKind::AttemptFailed | EventKind::RunFailed
-            | EventKind::RunTimeout | EventKind::RunCancelled => "error",
+            EventKind::AttemptFailed
+            | EventKind::RunFailed
+            | EventKind::RunTimeout
+            | EventKind::RunCancelled => "error",
             _ => "info",
         }
     }
@@ -48,8 +50,13 @@ impl EventKind {
 /// attempt has a distinct `attempt_id`, and within one scope every emitted kind is
 /// distinct (e.g. `attempt_started` then `attempt_succeeded`/`attempt_failed`).
 pub(crate) fn emit(
-    conn: &Connection, kind: EventKind, job_id: &str, run_id: &str,
-    attempt_id: Option<&str>, message: &str, now: DateTime<Utc>,
+    conn: &Connection,
+    kind: EventKind,
+    job_id: &str,
+    run_id: &str,
+    attempt_id: Option<&str>,
+    message: &str,
+    now: DateTime<Utc>,
 ) -> Result<()> {
     let ts = now.to_rfc3339();
     let scope = attempt_id.unwrap_or(run_id);
@@ -72,10 +79,23 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let conn = crate::state::open(&dir.path().join("p.db")).unwrap();
         let now = Utc.timestamp_opt(1000, 0).unwrap();
-        emit(&conn, EventKind::RunStarted, "cleanup", "r1", None, "run started", now).unwrap();
-        let (etype, job, run): (String, Option<String>, Option<String>) = conn.query_row(
-            "select event_type, job_id, run_id from events where run_id='r1'",
-            [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap();
+        emit(
+            &conn,
+            EventKind::RunStarted,
+            "cleanup",
+            "r1",
+            None,
+            "run started",
+            now,
+        )
+        .unwrap();
+        let (etype, job, run): (String, Option<String>, Option<String>) = conn
+            .query_row(
+                "select event_type, job_id, run_id from events where run_id='r1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
         assert_eq!(etype, "run_started");
         assert_eq!(job.as_deref(), Some("cleanup"));
         assert_eq!(run.as_deref(), Some("r1"));

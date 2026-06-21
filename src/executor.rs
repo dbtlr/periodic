@@ -30,7 +30,12 @@ pub(crate) static CANCEL: AtomicBool = AtomicBool::new(false);
 /// Terminal outcome of a run (manual subset of run statuses).
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[allow(dead_code)]
-pub(crate) enum RunStatus { Success, Failed, Timeout, Cancelled }
+pub(crate) enum RunStatus {
+    Success,
+    Failed,
+    Timeout,
+    Cancelled,
+}
 
 impl RunStatus {
     pub(crate) fn as_str(self) -> &'static str {
@@ -59,13 +64,20 @@ pub(crate) struct RunOutcome {
 /// How a single attempt ended.
 #[derive(Clone, Copy)]
 #[allow(dead_code)]
-enum AttemptResult { Exited(i32), Timeout, Cancelled }
+enum AttemptResult {
+    Exited(i32),
+    Timeout,
+    Cancelled,
+}
 
 /// Execute `job` once (single attempt — the retry loop wraps this in Task 8),
 /// recording run/attempt/event rows and tee-ing output to the terminal + JSONL.
 #[allow(dead_code)]
 pub(crate) fn run_job(
-    conn: &rusqlite::Connection, logs_dir: &Path, job: &EffectiveJob, now: DateTime<Utc>,
+    conn: &rusqlite::Connection,
+    logs_dir: &Path,
+    job: &EffectiveJob,
+    now: DateTime<Utc>,
 ) -> Result<RunOutcome> {
     let job_id = job.id.as_deref().unwrap_or("");
     let run_id = format!("{job_id}-{}", now.timestamp_micros());
@@ -73,14 +85,31 @@ pub(crate) fn run_job(
 
     state::create_run(conn, &run_id, job_id, &config_hash, "manual", now)?;
     state::mark_run_running(conn, &run_id, now)?;
-    events::emit(conn, EventKind::RunStarted, job_id, &run_id, None, "run started", now)?;
+    events::emit(
+        conn,
+        EventKind::RunStarted,
+        job_id,
+        &run_id,
+        None,
+        "run started",
+        now,
+    )?;
 
     let writer = Arc::new(Mutex::new(DailyLogWriter::new(logs_dir.to_path_buf())));
 
     let mut attempt_number: i64 = 1;
     let (status, exit_code, attempts) = loop {
         let attempt_id = format!("{run_id}-{attempt_number}");
-        let result = run_attempt(conn, job, job_id, &run_id, &attempt_id, attempt_number, &writer, now)?;
+        let result = run_attempt(
+            conn,
+            job,
+            job_id,
+            &run_id,
+            &attempt_id,
+            attempt_number,
+            &writer,
+            now,
+        )?;
         match result {
             AttemptResult::Exited(0) => break (RunStatus::Success, Some(0), attempt_number as u32),
             AttemptResult::Exited(c) => {
@@ -99,20 +128,34 @@ pub(crate) fn run_job(
     let run_finished = Utc::now();
     finalize(conn, job_id, &run_id, status, exit_code, now, run_finished)?;
     Ok(RunOutcome {
-        id: run_id, job_id: job_id.to_owned(), status,
-        started_at: now.to_rfc3339(), finished_at: run_finished.to_rfc3339(),
-        exit_code, attempts,
+        id: run_id,
+        job_id: job_id.to_owned(),
+        status,
+        started_at: now.to_rfc3339(),
+        finished_at: run_finished.to_rfc3339(),
+        exit_code,
+        attempts,
     })
 }
 
 /// Persist terminal run state + outcome columns + a closing event.
 fn finalize(
-    conn: &rusqlite::Connection, job_id: &str, run_id: &str,
-    status: RunStatus, exit_code: Option<i32>, now: DateTime<Utc>,
+    conn: &rusqlite::Connection,
+    job_id: &str,
+    run_id: &str,
+    status: RunStatus,
+    exit_code: Option<i32>,
+    now: DateTime<Utc>,
     run_finished: DateTime<Utc>,
 ) -> Result<()> {
     state::finish_run(conn, run_id, status.as_str(), exit_code, None, run_finished)?;
-    state::update_job_outcome(conn, job_id, run_id, status == RunStatus::Success, run_finished)?;
+    state::update_job_outcome(
+        conn,
+        job_id,
+        run_id,
+        status == RunStatus::Success,
+        run_finished,
+    )?;
     let kind = match status {
         RunStatus::Success => EventKind::RunSucceeded,
         RunStatus::Failed => EventKind::RunFailed,
@@ -126,29 +169,59 @@ fn finalize(
 /// Spawn one process attempt, tee its output, and wait for it.
 #[allow(clippy::too_many_arguments)]
 fn run_attempt(
-    conn: &rusqlite::Connection, job: &EffectiveJob, job_id: &str, run_id: &str,
-    attempt_id: &str, attempt_number: i64, writer: &Arc<Mutex<DailyLogWriter>>,
+    conn: &rusqlite::Connection,
+    job: &EffectiveJob,
+    job_id: &str,
+    run_id: &str,
+    attempt_id: &str,
+    attempt_number: i64,
+    writer: &Arc<Mutex<DailyLogWriter>>,
     now: DateTime<Utc>,
 ) -> Result<AttemptResult> {
     let mut cmd = Command::new(&job.command);
-    cmd.args(&job.args).stdin(Stdio::null())
-        .stdout(Stdio::piped()).stderr(Stdio::piped());
-    if let Some(cwd) = &job.cwd { cmd.current_dir(cwd); }
+    cmd.args(&job.args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(cwd) = &job.cwd {
+        cmd.current_dir(cwd);
+    }
     set_process_group(&mut cmd);
 
     state::start_attempt(conn, attempt_id, run_id, attempt_number, None, now)?;
-    events::emit(conn, EventKind::AttemptStarted, job_id, run_id, Some(attempt_id),
-        &format!("attempt {attempt_number}"), now)?;
+    events::emit(
+        conn,
+        EventKind::AttemptStarted,
+        job_id,
+        run_id,
+        Some(attempt_id),
+        &format!("attempt {attempt_number}"),
+        now,
+    )?;
 
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
             // Spawn failure (e.g. command not found) is a failed attempt.
             let spawn_failed_at = Utc::now();
-            state::finish_attempt(conn, attempt_id, "failed", Some(127), None,
-                Some(&e.to_string()), spawn_failed_at)?;
-            events::emit(conn, EventKind::AttemptFailed, job_id, run_id, Some(attempt_id),
-                &e.to_string(), now)?;
+            state::finish_attempt(
+                conn,
+                attempt_id,
+                "failed",
+                Some(127),
+                None,
+                Some(&e.to_string()),
+                spawn_failed_at,
+            )?;
+            events::emit(
+                conn,
+                EventKind::AttemptFailed,
+                job_id,
+                run_id,
+                Some(attempt_id),
+                &e.to_string(),
+                now,
+            )?;
             return Ok(AttemptResult::Exited(127));
         }
     };
@@ -157,11 +230,27 @@ fn run_attempt(
 
     let out = child.stdout.take().expect("piped stdout");
     let err = child.stderr.take().expect("piped stderr");
-    let t_out = spawn_reader(out, "stdout", job_id, run_id, attempt_number as u32, writer.clone());
-    let t_err = spawn_reader(err, "stderr", job_id, run_id, attempt_number as u32, writer.clone());
+    let t_out = spawn_reader(
+        out,
+        "stdout",
+        job_id,
+        run_id,
+        attempt_number as u32,
+        writer.clone(),
+    );
+    let t_err = spawn_reader(
+        err,
+        "stderr",
+        job_id,
+        run_id,
+        attempt_number as u32,
+        writer.clone(),
+    );
 
     let (tx, rx) = mpsc::channel();
-    let waiter = thread::spawn(move || { let _ = tx.send(child.wait()); });
+    let waiter = thread::spawn(move || {
+        let _ = tx.send(child.wait());
+    });
 
     let result = wait_loop(&rx, pid, job.timeout_secs);
     let attempt_finished = Utc::now();
@@ -187,20 +276,35 @@ fn run_attempt(
 
 /// Read `reader` line-by-line, tee-ing to the terminal and the shared daily log.
 fn spawn_reader<R: std::io::Read + Send + 'static>(
-    reader: R, stream: &'static str, job_id: &str, run_id: &str, attempt: u32,
+    reader: R,
+    stream: &'static str,
+    job_id: &str,
+    run_id: &str,
+    attempt: u32,
     writer: Arc<Mutex<DailyLogWriter>>,
 ) -> thread::JoinHandle<()> {
     let (job_id, run_id) = (job_id.to_owned(), run_id.to_owned());
     thread::spawn(move || {
         for line in BufReader::new(reader).lines() {
-            let Ok(text) = line else { break; };
-            if stream == "stderr" { let _ = writeln!(std::io::stderr(), "{text}"); }
-            else { let _ = writeln!(std::io::stdout(), "{text}"); }
-            let rec = LogRecord {
-                ts: Utc::now().to_rfc3339(), job_id: job_id.clone(), run_id: run_id.clone(),
-                attempt, stream: stream.to_owned(), text,
+            let Ok(text) = line else {
+                break;
             };
-            if let Ok(mut w) = writer.lock() { let _ = w.append(&rec); }
+            if stream == "stderr" {
+                let _ = writeln!(std::io::stderr(), "{text}");
+            } else {
+                let _ = writeln!(std::io::stdout(), "{text}");
+            }
+            let rec = LogRecord {
+                ts: Utc::now().to_rfc3339(),
+                job_id: job_id.clone(),
+                run_id: run_id.clone(),
+                attempt,
+                stream: stream.to_owned(),
+                text,
+            };
+            if let Ok(mut w) = writer.lock() {
+                let _ = w.append(&rec);
+            }
         }
     })
 }
@@ -209,22 +313,26 @@ fn spawn_reader<R: std::io::Read + Send + 'static>(
 /// flag. On timeout/cancel: SIGTERM the group, wait `KILL_GRACE`, then SIGKILL.
 fn wait_loop(
     rx: &mpsc::Receiver<std::io::Result<std::process::ExitStatus>>,
-    pid: i32, timeout_secs: Option<u64>,
+    pid: i32,
+    timeout_secs: Option<u64>,
 ) -> AttemptResult {
     let tick = Duration::from_millis(100);
     let deadline = timeout_secs.map(|s| Instant::now() + Duration::from_secs(s));
     loop {
         match rx.recv_timeout(tick) {
             Ok(Ok(status)) => return AttemptResult::Exited(status.code().unwrap_or(-1)),
-            Ok(Err(_)) | Err(mpsc::RecvTimeoutError::Disconnected) =>
-                return AttemptResult::Exited(-1),
+            Ok(Err(_)) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return AttemptResult::Exited(-1);
+            }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
         if CANCEL.load(Ordering::SeqCst) {
             kill_group(pid);
             return drain_after_kill(rx, pid, AttemptResult::Cancelled);
         }
-        if let Some(d) = deadline && Instant::now() >= d {
+        if let Some(d) = deadline
+            && Instant::now() >= d
+        {
             kill_group(pid);
             return drain_after_kill(rx, pid, AttemptResult::Timeout);
         }
@@ -235,11 +343,16 @@ fn wait_loop(
 /// reap. Returns the supplied terminal result.
 fn drain_after_kill(
     rx: &mpsc::Receiver<std::io::Result<std::process::ExitStatus>>,
-    pid: i32, result: AttemptResult,
+    pid: i32,
+    result: AttemptResult,
 ) -> AttemptResult {
     match rx.recv_timeout(KILL_GRACE) {
         Ok(_) => result,
-        Err(_) => { force_kill_group(pid); let _ = rx.recv(); result }
+        Err(_) => {
+            force_kill_group(pid);
+            let _ = rx.recv();
+            result
+        }
     }
 }
 
@@ -251,8 +364,8 @@ mod unix_signals {
     use std::os::unix::process::CommandExt;
     use std::process::Command;
 
-    use nix::sys::signal::{killpg, Signal};
-    use nix::unistd::{setsid, Pid};
+    use nix::sys::signal::{Signal, killpg};
+    use nix::unistd::{Pid, setsid};
 
     /// Put the child in its own session/process group so the whole tree can be
     /// signaled and the terminal's Ctrl-C (sent to the parent's group) does not
@@ -278,20 +391,28 @@ mod unix_signals {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::{TimeZone, Utc};
     use crate::config::EffectiveJob;
+    use chrono::{TimeZone, Utc};
 
-    fn now() -> DateTime<Utc> { Utc.timestamp_opt(1_700_000_000, 0).unwrap() }
+    fn now() -> DateTime<Utc> {
+        Utc.timestamp_opt(1_700_000_000, 0).unwrap()
+    }
 
     fn job(id: &str, command: &str, args: &[&str]) -> EffectiveJob {
         EffectiveJob {
-            id: Some(id.into()), title: None, enabled: true,
+            id: Some(id.into()),
+            title: None,
+            enabled: true,
             schedule: crate::config::NormalizedSchedule::MinuteAligned { every_minutes: 15 },
-            command: command.into(), args: args.iter().map(|s| s.to_string()).collect(),
-            cwd: None, timeout_secs: None, timezone: None,
+            command: command.into(),
+            args: args.iter().map(|s| s.to_string()).collect(),
+            cwd: None,
+            timeout_secs: None,
+            timezone: None,
             overlap_policy: crate::config::OverlapPolicy::Skip,
             missed_run_policy: crate::config::MissedRunPolicy::Skip,
-            max_retries: 0, tags: vec![],
+            max_retries: 0,
+            tags: vec![],
         }
     }
 
@@ -304,18 +425,30 @@ mod tests {
     fn seed(conn: &rusqlite::Connection, id: &str) {
         conn.execute(
             "insert into jobs_state (job_id, state, config_hash, schedule_kind, updated_at)
-             values (?1, 'active', 'h', 'minute', '2026-06-20T00:00:00Z')", [id]).unwrap();
+             values (?1, 'active', 'h', 'minute', '2026-06-20T00:00:00Z')",
+            [id],
+        )
+        .unwrap();
     }
 
     #[test]
     fn successful_command_records_success_run() {
         let (dir, conn) = fixture();
         seed(&conn, "ok");
-        let out = run_job(&conn, &dir.path().join("logs"), &job("ok", "true", &[]), now()).unwrap();
+        let out = run_job(
+            &conn,
+            &dir.path().join("logs"),
+            &job("ok", "true", &[]),
+            now(),
+        )
+        .unwrap();
         assert!(matches!(out.status, RunStatus::Success));
         assert_eq!(out.exit_code, Some(0));
-        let status: String = conn.query_row(
-            "select status from runs where id=?1", [&out.id], |r| r.get(0)).unwrap();
+        let status: String = conn
+            .query_row("select status from runs where id=?1", [&out.id], |r| {
+                r.get(0)
+            })
+            .unwrap();
         assert_eq!(status, "success");
     }
 
@@ -323,11 +456,22 @@ mod tests {
     fn failing_command_records_failed_run_and_increments_failures() {
         let (dir, conn) = fixture();
         seed(&conn, "bad");
-        let out = run_job(&conn, &dir.path().join("logs"), &job("bad", "false", &[]), now()).unwrap();
+        let out = run_job(
+            &conn,
+            &dir.path().join("logs"),
+            &job("bad", "false", &[]),
+            now(),
+        )
+        .unwrap();
         assert!(matches!(out.status, RunStatus::Failed));
         assert_eq!(out.exit_code, Some(1));
-        let fails: i64 = conn.query_row(
-            "select consecutive_failures from jobs_state where job_id='bad'", [], |r| r.get(0)).unwrap();
+        let fails: i64 = conn
+            .query_row(
+                "select consecutive_failures from jobs_state where job_id='bad'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(fails, 1);
     }
 
@@ -338,8 +482,11 @@ mod tests {
         let logs = dir.path().join("logs");
         let out = run_job(&conn, &logs, &job("echoer", "echo", &["hi-there"]), now()).unwrap();
         let recs = crate::logs::read_logs(&logs, "echoer", Some(&out.id)).unwrap();
-        assert!(recs.iter().any(|r| r.stream == "stdout" && r.text.contains("hi-there")),
-            "captured stdout, got {recs:?}");
+        assert!(
+            recs.iter()
+                .any(|r| r.stream == "stdout" && r.text.contains("hi-there")),
+            "captured stdout, got {recs:?}"
+        );
     }
 
     #[test]
@@ -347,18 +494,34 @@ mod tests {
         let (dir, conn) = fixture();
         seed(&conn, "nosuchbin");
         let out = run_job(
-            &conn, &dir.path().join("logs"),
+            &conn,
+            &dir.path().join("logs"),
             &job("nosuchbin", "periodic_no_such_command_xyz", &[]),
             now(),
-        ).unwrap();
-        assert!(matches!(out.status, RunStatus::Failed),
-            "expected Failed, got {:?}", out.status);
-        let attempt_status: String = conn.query_row(
-            "select status from run_attempts where run_id=?1", [&out.id], |r| r.get(0)).unwrap();
+        )
+        .unwrap();
+        assert!(
+            matches!(out.status, RunStatus::Failed),
+            "expected Failed, got {:?}",
+            out.status
+        );
+        let attempt_status: String = conn
+            .query_row(
+                "select status from run_attempts where run_id=?1",
+                [&out.id],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(attempt_status, "failed");
     }
 
-    fn job_to(id: &str, command: &str, args: &[&str], timeout_secs: Option<u64>, retries: u32) -> EffectiveJob {
+    fn job_to(
+        id: &str,
+        command: &str,
+        args: &[&str],
+        timeout_secs: Option<u64>,
+        retries: u32,
+    ) -> EffectiveJob {
         let mut j = job(id, command, args);
         j.timeout_secs = timeout_secs;
         j.max_retries = retries;
@@ -369,21 +532,40 @@ mod tests {
     fn timeout_terminates_and_marks_timeout() {
         let (dir, conn) = fixture();
         seed(&conn, "slow");
-        let out = run_job(&conn, &dir.path().join("logs"),
-            &job_to("slow", "sleep", &["30"], Some(1), 0), now()).unwrap();
-        assert!(matches!(out.status, RunStatus::Timeout), "got {:?}", out.status);
+        let out = run_job(
+            &conn,
+            &dir.path().join("logs"),
+            &job_to("slow", "sleep", &["30"], Some(1), 0),
+            now(),
+        )
+        .unwrap();
+        assert!(
+            matches!(out.status, RunStatus::Timeout),
+            "got {:?}",
+            out.status
+        );
     }
 
     #[test]
     fn retries_on_failure_then_records_attempts() {
         let (dir, conn) = fixture();
         seed(&conn, "retry");
-        let out = run_job(&conn, &dir.path().join("logs"),
-            &job_to("retry", "false", &[], None, 2), now()).unwrap();
+        let out = run_job(
+            &conn,
+            &dir.path().join("logs"),
+            &job_to("retry", "false", &[], None, 2),
+            now(),
+        )
+        .unwrap();
         assert!(matches!(out.status, RunStatus::Failed));
         assert_eq!(out.attempts, 3);
-        let n: i64 = conn.query_row(
-            "select count(*) from run_attempts where run_id=?1", [&out.id], |r| r.get(0)).unwrap();
+        let n: i64 = conn
+            .query_row(
+                "select count(*) from run_attempts where run_id=?1",
+                [&out.id],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(n, 3);
     }
 
@@ -391,8 +573,13 @@ mod tests {
     fn timeout_is_not_retried() {
         let (dir, conn) = fixture();
         seed(&conn, "slow2");
-        let out = run_job(&conn, &dir.path().join("logs"),
-            &job_to("slow2", "sleep", &["30"], Some(1), 3), now()).unwrap();
+        let out = run_job(
+            &conn,
+            &dir.path().join("logs"),
+            &job_to("slow2", "sleep", &["30"], Some(1), 3),
+            now(),
+        )
+        .unwrap();
         assert!(matches!(out.status, RunStatus::Timeout));
         assert_eq!(out.attempts, 1, "timeout is terminal, not retried");
     }

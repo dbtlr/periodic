@@ -116,7 +116,9 @@ pub(crate) fn default_db_path() -> PathBuf {
 
 /// Default on-disk location of per-day run output logs.
 pub(crate) fn default_logs_dir() -> PathBuf {
-    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_default();
     home.join(".local/state/periodic/logs")
 }
 
@@ -231,8 +233,12 @@ fn schedule_kind(schedule: &NormalizedSchedule) -> &'static str {
 /// Insert a `pending` run row. Manual runs pass `trigger_type = "manual"` and a
 /// null `occurrence_key` (no scheduled-occurrence dedupe for manual triggers).
 pub(crate) fn create_run(
-    conn: &Connection, id: &str, job_id: &str, config_hash: &str,
-    trigger_type: &str, now: DateTime<Utc>,
+    conn: &Connection,
+    id: &str,
+    job_id: &str,
+    config_hash: &str,
+    trigger_type: &str,
+    now: DateTime<Utc>,
 ) -> Result<()> {
     let ts = now.to_rfc3339();
     conn.execute(
@@ -255,8 +261,12 @@ pub(crate) fn mark_run_running(conn: &Connection, id: &str, now: DateTime<Utc>) 
 
 /// Terminal run update: status + optional exit code / error message + `finished_at`.
 pub(crate) fn finish_run(
-    conn: &Connection, id: &str, status: &str, exit_code: Option<i32>,
-    error: Option<&str>, now: DateTime<Utc>,
+    conn: &Connection,
+    id: &str,
+    status: &str,
+    exit_code: Option<i32>,
+    error: Option<&str>,
+    now: DateTime<Utc>,
 ) -> Result<()> {
     let ts = now.to_rfc3339();
     conn.execute(
@@ -268,8 +278,12 @@ pub(crate) fn finish_run(
 
 /// Insert a `running` attempt row.
 pub(crate) fn start_attempt(
-    conn: &Connection, id: &str, run_id: &str, attempt_number: i64,
-    pid: Option<i32>, now: DateTime<Utc>,
+    conn: &Connection,
+    id: &str,
+    run_id: &str,
+    attempt_number: i64,
+    pid: Option<i32>,
+    now: DateTime<Utc>,
 ) -> Result<()> {
     let ts = now.to_rfc3339();
     conn.execute(
@@ -282,15 +296,22 @@ pub(crate) fn start_attempt(
 
 /// Record the OS pid on an already-started attempt (known only post-spawn).
 pub(crate) fn start_attempt_pid(conn: &Connection, id: &str, pid: i32) -> Result<()> {
-    conn.execute("update run_attempts set pid=?2 where id=?1",
-        rusqlite::params![id, i64::from(pid)])?;
+    conn.execute(
+        "update run_attempts set pid=?2 where id=?1",
+        rusqlite::params![id, i64::from(pid)],
+    )?;
     Ok(())
 }
 
 /// Terminal attempt update.
 pub(crate) fn finish_attempt(
-    conn: &Connection, id: &str, status: &str, exit_code: Option<i32>,
-    signal: Option<i32>, error: Option<&str>, now: DateTime<Utc>,
+    conn: &Connection,
+    id: &str,
+    status: &str,
+    exit_code: Option<i32>,
+    signal: Option<i32>,
+    error: Option<&str>,
+    now: DateTime<Utc>,
 ) -> Result<()> {
     let ts = now.to_rfc3339();
     conn.execute(
@@ -305,7 +326,11 @@ pub(crate) fn finish_attempt(
 /// Success sets `last_success_at` and zeroes `consecutive_failures`; failure sets
 /// `last_failure_at` and increments the counter. Always records `last_run_id`.
 pub(crate) fn update_job_outcome(
-    conn: &Connection, job_id: &str, run_id: &str, succeeded: bool, now: DateTime<Utc>,
+    conn: &Connection,
+    job_id: &str,
+    run_id: &str,
+    succeeded: bool,
+    now: DateTime<Utc>,
 ) -> Result<()> {
     let ts = now.to_rfc3339();
     if succeeded {
@@ -327,7 +352,10 @@ pub(crate) fn update_job_outcome(
 /// Whether a job id is present in `jobs_state` (used by `jobs run`/`history`).
 pub(crate) fn job_exists(conn: &Connection, job_id: &str) -> Result<bool> {
     let n: i64 = conn.query_row(
-        "select count(*) from jobs_state where job_id=?1", [job_id], |r| r.get(0))?;
+        "select count(*) from jobs_state where job_id=?1",
+        [job_id],
+        |r| r.get(0),
+    )?;
     Ok(n > 0)
 }
 
@@ -357,9 +385,13 @@ pub(crate) fn list_runs(conn: &Connection, job_id: &str, limit: i64) -> Result<V
     let rows = stmt
         .query_map(rusqlite::params![job_id, limit], |row| {
             Ok(RunRow {
-                id: row.get(0)?, status: row.get(1)?, trigger_type: row.get(2)?,
-                started_at: row.get(3)?, finished_at: row.get(4)?,
-                exit_code: row.get(5)?, attempts: row.get(6)?,
+                id: row.get(0)?,
+                status: row.get(1)?,
+                trigger_type: row.get(2)?,
+                started_at: row.get(3)?,
+                finished_at: row.get(4)?,
+                exit_code: row.get(5)?,
+                attempts: row.get(6)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -602,14 +634,22 @@ mod tests {
             .unwrap()
             .map(|r| r.unwrap())
             .collect();
-        assert!(!cols.contains(&"stdout_path".to_string()), "stdout_path should be dropped");
-        assert!(!cols.contains(&"stderr_path".to_string()), "stderr_path should be dropped");
+        assert!(
+            !cols.contains(&"stdout_path".to_string()),
+            "stdout_path should be dropped"
+        );
+        assert!(
+            !cols.contains(&"stderr_path".to_string()),
+            "stderr_path should be dropped"
+        );
     }
 
     #[test]
     fn user_version_is_two_after_migrations() {
         let (_dir, conn) = temp_db();
-        let v: i64 = conn.query_row("pragma user_version", [], |r| r.get(0)).unwrap();
+        let v: i64 = conn
+            .query_row("pragma user_version", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(v, 2);
     }
 }
@@ -899,22 +939,30 @@ mod run_writer_tests {
         let conn = open(&dir.path().join("periodic.db")).unwrap();
         (dir, conn)
     }
-    fn at(s: i64) -> DateTime<Utc> { Utc.timestamp_opt(s, 0).unwrap() }
+    fn at(s: i64) -> DateTime<Utc> {
+        Utc.timestamp_opt(s, 0).unwrap()
+    }
 
     fn seed_job(conn: &Connection) {
         conn.execute(
             "insert into jobs_state (job_id, state, config_hash, schedule_kind, updated_at)
-             values ('cleanup', 'active', 'h', 'minute', '2026-06-20T00:00:00Z')", [],
-        ).unwrap();
+             values ('cleanup', 'active', 'h', 'minute', '2026-06-20T00:00:00Z')",
+            [],
+        )
+        .unwrap();
     }
 
     #[test]
     fn create_run_inserts_pending_manual_run() {
         let (_d, conn) = temp_db();
         create_run(&conn, "r1", "cleanup", "h", "manual", at(1000)).unwrap();
-        let (status, trig): (String, String) = conn.query_row(
-            "select status, trigger_type from runs where id='r1'", [], |r| Ok((r.get(0)?, r.get(1)?)),
-        ).unwrap();
+        let (status, trig): (String, String) = conn
+            .query_row(
+                "select status, trigger_type from runs where id='r1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
         assert_eq!((status.as_str(), trig.as_str()), ("pending", "manual"));
     }
 
@@ -924,9 +972,18 @@ mod run_writer_tests {
         create_run(&conn, "r1", "cleanup", "h", "manual", at(1000)).unwrap();
         mark_run_running(&conn, "r1", at(1001)).unwrap();
         finish_run(&conn, "r1", "failed", Some(2), None, at(1005)).unwrap();
-        let (status, code, started, finished): (String, Option<i64>, Option<String>, Option<String>) =
-            conn.query_row("select status, exit_code, started_at, finished_at from runs where id='r1'",
-                [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).unwrap();
+        let (status, code, started, finished): (
+            String,
+            Option<i64>,
+            Option<String>,
+            Option<String>,
+        ) = conn
+            .query_row(
+                "select status, exit_code, started_at, finished_at from runs where id='r1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
         assert_eq!(status, "failed");
         assert_eq!(code, Some(2));
         assert!(started.is_some() && finished.is_some());
@@ -940,7 +997,13 @@ mod run_writer_tests {
         finish_attempt(&conn, "a1", "failed", Some(1), None, None, at(1002)).unwrap();
         start_attempt(&conn, "a2", "r1", 2, Some(4243), at(1003)).unwrap();
         finish_attempt(&conn, "a2", "success", Some(0), None, None, at(1004)).unwrap();
-        let n: i64 = conn.query_row("select count(*) from run_attempts where run_id='r1'", [], |r| r.get(0)).unwrap();
+        let n: i64 = conn
+            .query_row(
+                "select count(*) from run_attempts where run_id='r1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(n, 2);
 
         // Verify a1 column values
@@ -968,7 +1031,11 @@ mod run_writer_tests {
     fn update_job_outcome_on_success_sets_last_success_and_clears_failures() {
         let (_d, conn) = temp_db();
         seed_job(&conn);
-        conn.execute("update jobs_state set consecutive_failures = 3 where job_id='cleanup'", []).unwrap();
+        conn.execute(
+            "update jobs_state set consecutive_failures = 3 where job_id='cleanup'",
+            [],
+        )
+        .unwrap();
         update_job_outcome(&conn, "cleanup", "r1", true, at(2000)).unwrap();
         let (last_run, success_at, fails): (Option<String>, Option<String>, i64) = conn.query_row(
             "select last_run_id, last_success_at, consecutive_failures from jobs_state where job_id='cleanup'",
@@ -1005,7 +1072,11 @@ mod run_writer_tests {
         create_run(&conn, "r1", "cleanup", "h", "manual", at(1000)).unwrap();
         start_attempt(&conn, "a1", "r1", 1, None, at(1001)).unwrap();
         start_attempt_pid(&conn, "a1", 4242).unwrap();
-        let pid: Option<i64> = conn.query_row("select pid from run_attempts where id='a1'", [], |r| r.get(0)).unwrap();
+        let pid: Option<i64> = conn
+            .query_row("select pid from run_attempts where id='a1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
         assert_eq!(pid, Some(4242));
     }
 
