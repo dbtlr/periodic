@@ -185,7 +185,13 @@ fn run_jobs_run(args: &cli::JobsRunArgs) -> anyhow::Result<ExitCode> {
     let conn = state::open(&state::default_db_path())?;
     state::reconcile(&conn, &effective, chrono::Utc::now())?;
     // Disabled jobs run on explicit manual trigger (spec §4) — no gating here.
-    let outcome = executor::run_job(&conn, &state::default_logs_dir(), job, chrono::Utc::now())?;
+    let outcome = executor::run_job(
+        &conn,
+        &state::default_logs_dir(),
+        job,
+        chrono::Utc::now(),
+        &executor::CANCEL,
+    )?;
     let rendered = match args.format {
         cli::OutputFormat::Json => output::render_run_json(&outcome),
         cli::OutputFormat::Human => output::render_run_human(&outcome),
@@ -213,8 +219,14 @@ fn run_jobs_history(args: &cli::JobsHistoryArgs) -> anyhow::Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// `periodic logs <id>`: render captured output from the daily JSONL files.
+/// `periodic logs <id>`: render captured output from the daily JSONL files
+/// (exit 1 if the job is unknown — distinct from a known job with no output).
 fn run_logs(args: &cli::LogsArgs) -> anyhow::Result<ExitCode> {
+    let conn = project_state()?;
+    if !state::job_exists(&conn, &args.id)? {
+        eprintln!("error: no such job: {}", args.id);
+        return Ok(ExitCode::from(1));
+    }
     let lines = logs::read_logs(&state::default_logs_dir(), &args.id, args.run.as_deref())?;
     let rendered = match args.format {
         cli::OutputFormat::Json => output::render_logs_json(&lines),

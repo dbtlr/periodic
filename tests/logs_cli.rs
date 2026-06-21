@@ -34,3 +34,11 @@ fn logs_empty_for_unrun_job() {
         .success()
         .stdout(predicates::str::contains("no output"));
 }
+
+#[test]
+fn logs_unknown_job_exits_one() {
+    // A known-but-unrun job is "no output" exit 0 (above); a job that isn't in the
+    // config at all must error, not silently report nothing.
+    let home = setup(ECHOER);
+    periodic(&home, &["logs", "ghost"]).code(1);
+}
