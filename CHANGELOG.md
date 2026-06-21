@@ -7,6 +7,13 @@ is pre-1.0, minor versions (`0.x`) may carry breaking changes.
 
 ## [Unreleased]
 
+## v0.4.0 - 2026-06-21
+
+The `0.4` increment — runtime state. periodic now persists observed state in a
+SQLite database and surfaces each job's computed next run. This is also the first
+stable cut to expose the schedule-computation engine (built internally in `0.3`)
+to users, via the next-run times shown by `jobs list`/`status`.
+
 ### Added
 
 - `periodic jobs list [--format human|json]` — list configured jobs with their
