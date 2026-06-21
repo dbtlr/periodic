@@ -4,7 +4,9 @@
 use serde::Serialize;
 
 use crate::diagnostics::Diagnostic;
-use crate::state::JobStateRow;
+use crate::executor::{RunOutcome, RunStatus};
+use crate::logs::LogRecord;
+use crate::state::{JobStateRow, RunRow};
 
 #[derive(Serialize)]
 pub(crate) struct Summary {
@@ -134,10 +136,163 @@ fn col_width(cells: impl Iterator<Item = usize>, header: &str) -> usize {
     cells.max().unwrap_or(0).max(header.len())
 }
 
+// ─── run summary / history / logs ───────────────────────────────────────────
+
+#[derive(Serialize)]
+#[allow(dead_code)]
+struct RunSummary<'a> {
+    id: &'a str,
+    job_id: &'a str,
+    status: &'a str,
+    trigger_type: &'a str,
+    started_at: &'a str,
+    finished_at: &'a str,
+    exit_code: Option<i32>,
+    attempts: u32,
+}
+
+#[derive(Serialize)]
+#[allow(dead_code)]
+struct RunReport<'a> {
+    run: RunSummary<'a>,
+}
+
+#[derive(Serialize)]
+#[allow(dead_code)]
+struct RunsReport<'a> {
+    runs: &'a [RunRow],
+}
+
+#[derive(Serialize)]
+#[allow(dead_code)]
+struct LogsReport<'a> {
+    lines: &'a [LogRecord],
+}
+
+/// `jobs run --format json`: `{ "run": { … } }`.
+#[allow(dead_code)]
+pub(crate) fn render_run_json(out: &RunOutcome) -> String {
+    let report = RunReport {
+        run: RunSummary {
+            id: &out.id,
+            job_id: &out.job_id,
+            status: out.status.as_str(),
+            trigger_type: "manual",
+            started_at: &out.started_at,
+            finished_at: &out.finished_at,
+            exit_code: out.exit_code,
+            attempts: out.attempts,
+        },
+    };
+    serde_json::to_string_pretty(&report).expect("run report serializes")
+}
+
+/// `jobs run` human one-liner. Glyph carries success/failure (NO_COLOR-safe).
+#[allow(dead_code)]
+pub(crate) fn render_run_human(out: &RunOutcome) -> String {
+    let glyph = if out.status == RunStatus::Success {
+        "✓"
+    } else {
+        "✗"
+    };
+    let code = out
+        .exit_code
+        .map(|c| c.to_string())
+        .unwrap_or_else(|| "—".into());
+    format!(
+        "{glyph} {} {} (exit {code}, {} attempt(s))\n",
+        out.job_id, out.status.as_str(), out.attempts
+    )
+}
+
+/// `jobs history --format json`: `{ "runs": [ … ] }`.
+#[allow(dead_code)]
+pub(crate) fn render_runs_json(runs: &[RunRow]) -> String {
+    serde_json::to_string_pretty(&RunsReport { runs }).expect("runs report serializes")
+}
+
+/// `jobs history` human table.
+#[allow(dead_code)]
+pub(crate) fn render_runs_human(runs: &[RunRow]) -> String {
+    if runs.is_empty() {
+        return "no runs yet\n".to_owned();
+    }
+    let mut s = String::from("RUN                       STATUS     EXIT  STARTED\n");
+    for r in runs {
+        let code = r
+            .exit_code
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "—".into());
+        let started = r.started_at.as_deref().unwrap_or("—");
+        s.push_str(&format!(
+            "{:<24}  {:<9}  {:>4}  {started}\n",
+            r.id, r.status, code
+        ));
+    }
+    s.push_str(&format!("\n{} run(s)\n", runs.len()));
+    s
+}
+
+/// `logs --format json`: `{ "lines": [ … raw LogRecords … ] }`.
+#[allow(dead_code)]
+pub(crate) fn render_logs_json(lines: &[LogRecord]) -> String {
+    serde_json::to_string_pretty(&LogsReport { lines }).expect("logs report serializes")
+}
+
+/// `logs` human render: one line per record, stderr marked with `!`.
+#[allow(dead_code)]
+pub(crate) fn render_logs_human(lines: &[LogRecord]) -> String {
+    if lines.is_empty() {
+        return "no output\n".to_owned();
+    }
+    let mut s = String::new();
+    for l in lines {
+        let tag = if l.stream == "stderr" { "!" } else { " " };
+        s.push_str(&format!("{tag} {}\n", l.text));
+    }
+    s
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::diagnostics::Diagnostic;
+
+    #[test]
+    fn run_json_wraps_in_run_key() {
+        use crate::executor::{RunOutcome, RunStatus};
+        let out = RunOutcome { id: "r1".into(), job_id: "cleanup".into(), status: RunStatus::Success,
+            started_at: "2026-06-21T00:00:00+00:00".into(), finished_at: "2026-06-21T00:00:01+00:00".into(),
+            exit_code: Some(0), attempts: 1 };
+        let json = render_run_json(&out);
+        assert!(json.contains("\"run\""));
+        assert!(json.contains("\"status\": \"success\""));
+        assert!(json.contains("\"exit_code\": 0"));
+    }
+
+    #[test]
+    fn runs_json_wraps_in_runs_array() {
+        use crate::state::RunRow;
+        let rows = vec![RunRow { id: "r1".into(), status: "failed".into(), trigger_type: "manual".into(),
+            started_at: Some("2026-06-21T00:00:00+00:00".into()),
+            finished_at: Some("2026-06-21T00:00:01+00:00".into()), exit_code: Some(1), attempts: 2 }];
+        let json = render_runs_json(&rows);
+        assert!(json.contains("\"runs\""));
+        assert!(json.contains("\"id\": \"r1\""));
+    }
+
+    #[test]
+    fn logs_human_renders_stream_lines() {
+        use crate::logs::LogRecord;
+        let recs = vec![LogRecord { ts: "2026-06-21T00:00:00+00:00".into(), job_id: "c".into(),
+            run_id: "r1".into(), attempt: 1, stream: "stdout".into(), text: "hello".into() }];
+        assert!(render_logs_human(&recs).contains("hello"));
+    }
+
+    #[test]
+    fn logs_human_handles_empty() {
+        assert!(render_logs_human(&[]).contains("no output"));
+    }
 
     #[test]
     fn json_matches_golden() {
