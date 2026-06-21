@@ -392,6 +392,67 @@ fn parse_missed_run_policy(s: Option<&str>) -> MissedRunPolicy {
     }
 }
 
+// ─── config hashing ────────────────────────────────────────────────────────
+
+/// SHA-256 (hex) over the canonical serialization of a job's runtime-affecting
+/// effective config (`config-versioning-and-hashing` spec). Two jobs whose
+/// runtime behavior is identical hash equally; purely presentational fields
+/// (`title`, `tags`) and the job's identity (`id`) are excluded. This is the
+/// per-job config identity used to correlate a run with the config that produced
+/// it, and the projection identity stored in `jobs_state`.
+pub(crate) fn job_config_hash(job: &EffectiveJob) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(canonical_job(job).as_bytes());
+    digest.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Render a job's runtime-affecting fields into a canonical, unambiguous string.
+/// Field order is fixed and every value is delimited so distinct inputs cannot
+/// collide (e.g. `args` are joined on the ASCII unit separator, never a space).
+fn canonical_job(job: &EffectiveJob) -> String {
+    use std::fmt::Write;
+    let mut s = String::new();
+    let _ = writeln!(s, "enabled={}", job.enabled);
+    let _ = writeln!(s, "schedule={}", canonical_schedule(&job.schedule));
+    let _ = writeln!(s, "command={}", job.command);
+    let _ = writeln!(s, "args={}", job.args.join("\u{1f}"));
+    let _ = writeln!(s, "cwd={}", job.cwd.as_deref().unwrap_or(""));
+    let _ = writeln!(
+        s,
+        "timeout_secs={}",
+        job.timeout_secs.map(|n| n.to_string()).unwrap_or_default()
+    );
+    let _ = writeln!(s, "timezone={}", job.timezone.as_deref().unwrap_or(""));
+    let _ = writeln!(s, "overlap={:?}", job.overlap_policy);
+    let _ = writeln!(s, "missed={:?}", job.missed_run_policy);
+    let _ = writeln!(s, "max_retries={}", job.max_retries);
+    s
+}
+
+/// Canonical, deterministic string form of a normalized schedule.
+fn canonical_schedule(schedule: &NormalizedSchedule) -> String {
+    match schedule {
+        NormalizedSchedule::MinuteAligned { every_minutes } => format!("minute:{every_minutes}"),
+        NormalizedSchedule::HourAligned { every_hours } => format!("hour:{every_hours}"),
+        NormalizedSchedule::Calendar {
+            days,
+            at,
+            timezone,
+            on_day,
+            last_day,
+        } => format!(
+            "calendar:days={}:at={at}:tz={}:on_day={}:last_day={last_day}",
+            days.join(","),
+            timezone.as_deref().unwrap_or(""),
+            on_day.map(|d| d.to_string()).unwrap_or_default(),
+        ),
+        NormalizedSchedule::Cron {
+            expression,
+            timezone,
+        } => format!("cron:{expression}:tz={}", timezone.as_deref().unwrap_or("")),
+    }
+}
+
 // ─── parse ───────────────────────────────────────────────────────────────────
 
 /// Parse raw YAML into the typed config. Structural problems (syntax, unknown /
@@ -635,5 +696,88 @@ mod normalize_tests {
             NormalizedSchedule::Calendar { days, at, .. }
                 if days == &["monday", "wednesday", "friday"] && at == "09:00"
         ));
+    }
+}
+
+#[cfg(test)]
+mod hash_tests {
+    use super::*;
+
+    /// A baseline effective job; tests mutate one field to isolate its effect.
+    fn job() -> EffectiveJob {
+        EffectiveJob {
+            id: Some("job".to_owned()),
+            title: Some("Title".to_owned()),
+            enabled: true,
+            schedule: NormalizedSchedule::MinuteAligned { every_minutes: 15 },
+            command: "run.sh".to_owned(),
+            args: vec!["--flag".to_owned()],
+            cwd: Some("~/work".to_owned()),
+            timeout_secs: Some(600),
+            timezone: Some("UTC".to_owned()),
+            overlap_policy: OverlapPolicy::Skip,
+            missed_run_policy: MissedRunPolicy::Skip,
+            max_retries: 0,
+            tags: vec!["nightly".to_owned()],
+        }
+    }
+
+    #[test]
+    fn hash_is_deterministic() {
+        assert_eq!(job_config_hash(&job()), job_config_hash(&job()));
+    }
+
+    #[test]
+    fn hash_is_sha256_hex() {
+        let h = job_config_hash(&job());
+        assert_eq!(h.len(), 64, "expected 64 hex chars, got {h:?}");
+        assert!(h.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn hash_changes_when_schedule_changes() {
+        let mut other = job();
+        other.schedule = NormalizedSchedule::MinuteAligned { every_minutes: 30 };
+        assert_ne!(job_config_hash(&job()), job_config_hash(&other));
+    }
+
+    #[test]
+    fn hash_changes_when_command_changes() {
+        let mut other = job();
+        other.command = "other.sh".to_owned();
+        assert_ne!(job_config_hash(&job()), job_config_hash(&other));
+    }
+
+    #[test]
+    fn hash_changes_when_enabled_changes() {
+        let mut other = job();
+        other.enabled = false;
+        assert_ne!(job_config_hash(&job()), job_config_hash(&other));
+    }
+
+    #[test]
+    fn hash_ignores_presentational_fields() {
+        let mut other = job();
+        other.title = Some("A different title".to_owned());
+        other.tags = vec!["different".to_owned(), "tags".to_owned()];
+        other.id = Some("different-id".to_owned());
+        assert_eq!(
+            job_config_hash(&job()),
+            job_config_hash(&other),
+            "title/tags/id must not affect the config hash"
+        );
+    }
+
+    #[test]
+    fn hash_distinguishes_arg_boundaries() {
+        let mut a = job();
+        a.args = vec!["a".to_owned(), "b".to_owned()];
+        let mut b = job();
+        b.args = vec!["a b".to_owned()];
+        assert_ne!(
+            job_config_hash(&a),
+            job_config_hash(&b),
+            "['a','b'] must not collide with ['a b']"
+        );
     }
 }

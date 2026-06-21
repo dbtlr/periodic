@@ -290,6 +290,11 @@ pub(crate) fn next_occurrence(
             ScheduleKind::Cron,
         ),
     };
+    // Occurrences identify a scheduled instant, never a sub-second moment. The
+    // cron path derives its result from `after` and can inherit its sub-second
+    // component; zero it so `occurrence_key` is deterministic regardless of when
+    // the computation ran. The wall-clock kinds already land on whole seconds.
+    let instant = instant.with_nanosecond(0).unwrap_or(instant);
     Some(Occurrence::new(job_id, kind, instant))
 }
 
@@ -664,5 +669,50 @@ mod tests {
                 cursor = occ.scheduled_for;
             }
         }
+    }
+
+    fn cron(expr: &str) -> NormalizedSchedule {
+        NormalizedSchedule::Cron {
+            expression: expr.to_owned(),
+            timezone: None,
+        }
+    }
+
+    /// An `after` whose seconds and sub-second components are non-zero, to prove
+    /// the computed occurrence does not inherit them.
+    fn after_with_subsecond() -> DateTime<Tz> {
+        Tz::UTC
+            .with_ymd_and_hms(2026, 6, 20, 0, 30, 17)
+            .unwrap()
+            .with_nanosecond(123_456_789)
+            .unwrap()
+    }
+
+    #[test]
+    fn cron_occurrence_has_no_sub_second_component() {
+        let occ =
+            next_occurrence("j", &cron("0 * * * *"), Tz::UTC, after_with_subsecond()).unwrap();
+        assert_eq!(
+            occ.scheduled_for.nanosecond(),
+            0,
+            "cron instant must be whole-second"
+        );
+        assert!(
+            !occ.key.contains('.'),
+            "occurrence_key must not carry sub-second precision: {}",
+            occ.key
+        );
+    }
+
+    #[test]
+    fn cron_occurrence_key_is_stable_across_sub_second_of_after() {
+        // The same logical fire computed at different microseconds of the same
+        // second must yield the same occurrence_key, or dedupe breaks.
+        let base = Tz::UTC.with_ymd_and_hms(2026, 6, 20, 0, 30, 0).unwrap();
+        let early = base.with_nanosecond(1).unwrap();
+        let late = base.with_nanosecond(999_000_000).unwrap();
+        let a = next_occurrence("j", &cron("0 * * * *"), Tz::UTC, early).unwrap();
+        let b = next_occurrence("j", &cron("0 * * * *"), Tz::UTC, late).unwrap();
+        assert_eq!(a.key, b.key);
     }
 }
