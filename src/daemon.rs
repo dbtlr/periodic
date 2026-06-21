@@ -146,8 +146,11 @@ fn run_foreground(db_path: &std::path::Path) -> anyhow::Result<ExitCode> {
         }
     });
 
+    // Apply each job's missed-run policy for occurrences that fired while down,
+    // then run the loop with those dispatched runs seeded so they get drained.
+    let missed = handle_missed_runs(&conn, &effective, now);
     let table = ScheduleTable::build(&effective, now);
-    scheduler_loop(&conn, table, &stop, &control_rx);
+    scheduler_loop(&conn, table, missed, &stop, &control_rx);
 
     // Graceful shutdown: stop the IPC server and join it.
     stop.store(true, Ordering::SeqCst);
@@ -163,11 +166,10 @@ fn run_foreground(db_path: &std::path::Path) -> anyhow::Result<ExitCode> {
 fn scheduler_loop(
     conn: &Connection,
     mut table: ScheduleTable,
+    mut runs: Vec<RunHandle>,
     stop: &AtomicBool,
     control_rx: &mpsc::Receiver<ControlEvent>,
 ) {
-    let mut runs: Vec<RunHandle> = Vec::new();
-
     while !stop.load(Ordering::SeqCst) {
         let now = Utc::now();
         if let Err(e) = state::record_daemon_heartbeat(conn, now) {
@@ -231,6 +233,145 @@ struct RunHandle {
 impl RunHandle {
     fn finished(&self) -> bool {
         self.done.load(Ordering::SeqCst)
+    }
+}
+
+/// How far back missed-run detection looks when a job has no recorded success
+/// (and the ceiling even when it does), so a long-idle daemon doesn't replay an
+/// unbounded history.
+const MISSED_LOOKBACK: chrono::Duration = chrono::Duration::days(1);
+/// Hard cap on missed occurrences considered per job (bounds `run_all`).
+const MISSED_CAP: usize = 1000;
+
+/// On startup, apply each job's `missed_run_policy` to occurrences that fired while
+/// the daemon was down. `skip` records one collapsed `skipped` run so the miss is
+/// visible in history (decision B); `run_once` dispatches the most recent missed
+/// occurrence; `run_all` dispatches each (bounded). `create_run`'s occurrence_key
+/// dedupe means an occurrence already run before the restart is never re-run.
+/// Returns handles for any dispatched runs so the loop can drain them.
+fn handle_missed_runs(
+    conn: &Connection,
+    effective: &config::EffectiveConfig,
+    now: DateTime<Utc>,
+) -> Vec<RunHandle> {
+    use crate::config::MissedRunPolicy;
+    let mut handles = Vec::new();
+    for job in &effective.jobs {
+        if !job.enabled {
+            continue;
+        }
+        let Some(job_id) = job.id.as_deref() else {
+            continue;
+        };
+        let missed = missed_occurrences(conn, job, job_id, now);
+        if missed.is_empty() {
+            continue;
+        }
+        let config_hash = config::job_config_hash(job);
+        match job.missed_run_policy {
+            MissedRunPolicy::Skip => {
+                let (key, inst) = missed.last().expect("non-empty");
+                let run_id = format!("{job_id}-missed-{}", inst.timestamp_micros());
+                match state::create_run(
+                    conn,
+                    &run_id,
+                    job_id,
+                    &config_hash,
+                    "missed",
+                    Some(key),
+                    now,
+                ) {
+                    Ok(true) => {
+                        let _ = state::finish_run(conn, &run_id, "skipped", None, None, now);
+                        tracing::info!(job = job_id, missed = missed.len(), "missed runs skipped");
+                    }
+                    Ok(false) => {}
+                    Err(e) => {
+                        tracing::warn!(error = %e, job = job_id, "failed to record missed-skip")
+                    }
+                }
+            }
+            MissedRunPolicy::RunOnce => {
+                let (key, inst) = missed.last().expect("non-empty");
+                if let Some(h) = dispatch_missed(conn, job, job_id, &config_hash, key, *inst, now) {
+                    handles.push(h);
+                }
+            }
+            MissedRunPolicy::RunAll => {
+                for (key, inst) in &missed {
+                    if let Some(h) =
+                        dispatch_missed(conn, job, job_id, &config_hash, key, *inst, now)
+                    {
+                        handles.push(h);
+                    }
+                }
+            }
+        }
+    }
+    handles
+}
+
+/// Occurrences in `(anchor, now]` that should have fired while the daemon was down,
+/// where `anchor` is the job's last success (floored at `now - MISSED_LOOKBACK`).
+/// Computed by stepping the forward schedule engine; capped at `MISSED_CAP`.
+fn missed_occurrences(
+    conn: &Connection,
+    job: &crate::config::EffectiveJob,
+    job_id: &str,
+    now: DateTime<Utc>,
+) -> Vec<(String, DateTime<Utc>)> {
+    let floor = now - MISSED_LOOKBACK;
+    let anchor = state::last_success_at(conn, job_id)
+        .ok()
+        .flatten()
+        .map_or(floor, |last| last.max(floor));
+    let tz = crate::scheduler::resolve_timezone(job.timezone.as_deref());
+    let mut out = Vec::new();
+    let mut after = anchor.with_timezone(&tz);
+    while let Some(occ) = crate::scheduler::next_occurrence(job_id, &job.schedule, tz, after) {
+        let inst = occ.scheduled_for.with_timezone(&Utc);
+        if inst > now {
+            break;
+        }
+        out.push((occ.key, inst));
+        if out.len() >= MISSED_CAP {
+            break;
+        }
+        after = occ.scheduled_for;
+    }
+    out
+}
+
+/// Claim and dispatch a single missed occurrence (trigger `missed`). Returns the
+/// run handle, or `None` if the occurrence already ran (dedupe) or claim failed.
+fn dispatch_missed(
+    conn: &Connection,
+    job: &crate::config::EffectiveJob,
+    job_id: &str,
+    config_hash: &str,
+    occurrence_key: &str,
+    scheduled: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> Option<RunHandle> {
+    let run_id = format!("{job_id}-missed-{}", scheduled.timestamp_micros());
+    match state::create_run(
+        conn,
+        &run_id,
+        job_id,
+        config_hash,
+        "missed",
+        Some(occurrence_key),
+        now,
+    ) {
+        Ok(true) => {
+            tracing::info!(job = job_id, occurrence = %occurrence_key, "dispatching missed run");
+            Some(spawn_run(job.clone(), run_id))
+        }
+        Ok(false) => None,
+        Err(e) => {
+            tracing::warn!(error = %e, job = job_id, "failed to claim missed occurrence");
+            None
+        }
     }
 }
 
@@ -755,5 +896,75 @@ mod tests {
             status, "skipped_overlap",
             "the skipped occurrence is recorded"
         );
+    }
+
+    // ── missed-run handling ───────────────────────────────────────────────────
+
+    fn seed_success(conn: &Connection, job_id: &str, success: DateTime<Utc>) {
+        conn.execute(
+            "insert into jobs_state (job_id, state, config_hash, schedule_kind, last_success_at, updated_at)
+             values (?1, 'active', 'h', 'minute', ?2, ?2)",
+            rusqlite::params![job_id, success.to_rfc3339()],
+        )
+        .unwrap();
+    }
+
+    fn cfg(job: crate::config::EffectiveJob) -> crate::config::EffectiveConfig {
+        crate::config::EffectiveConfig {
+            version: 1,
+            jobs: vec![job],
+        }
+    }
+
+    #[test]
+    fn missed_occurrences_are_bounded_by_last_success() {
+        // last success 00:00, now 01:00, every 15m -> 00:15/00:30/00:45/01:00 missed.
+        let (_d, conn) = temp_conn();
+        seed_success(&conn, "a", at(0));
+        let missed = missed_occurrences(&conn, &minute_job("a"), "a", at(3600));
+        assert_eq!(missed.len(), 4, "four 15m boundaries elapsed in the hour");
+    }
+
+    #[test]
+    fn missed_skip_records_one_collapsed_skipped_row() {
+        let (_d, conn) = temp_conn();
+        seed_success(&conn, "a", at(0));
+        let job = minute_job("a"); // default policy = Skip
+        let handles = handle_missed_runs(&conn, &cfg(job), at(3600));
+        assert!(handles.is_empty(), "skip dispatches no runs");
+        let (n, status): (i64, String) = conn
+            .query_row(
+                "select count(*), max(status) from runs where trigger_type='missed'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "one collapsed missed row");
+        assert_eq!(status, "skipped");
+    }
+
+    #[test]
+    fn missed_run_once_dispatches_the_latest_only() {
+        let (_d, conn) = temp_conn();
+        seed_success(&conn, "a", at(0));
+        let mut job = minute_job("a");
+        job.missed_run_policy = crate::config::MissedRunPolicy::RunOnce;
+        let handles = handle_missed_runs(&conn, &cfg(job), at(3600));
+        assert_eq!(
+            handles.len(),
+            1,
+            "run_once dispatches exactly one missed run"
+        );
+        for h in handles {
+            let _ = h.handle.join();
+        }
+        let n: i64 = conn
+            .query_row(
+                "select count(*) from runs where trigger_type='missed'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1);
     }
 }

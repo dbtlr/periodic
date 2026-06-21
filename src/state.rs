@@ -378,6 +378,25 @@ pub(crate) fn job_exists(conn: &Connection, job_id: &str) -> Result<bool> {
     Ok(n > 0)
 }
 
+/// The job's most recent successful-run instant, if any — the anchor the daemon
+/// uses on startup to bound which occurrences were missed while it was down. An
+/// absent or unparseable value reads as `None` (no anchor); the caller falls back
+/// to a bounded lookback.
+pub(crate) fn last_success_at(conn: &Connection, job_id: &str) -> Result<Option<DateTime<Utc>>> {
+    let raw: Option<Option<String>> = conn
+        .query_row(
+            "select last_success_at from jobs_state where job_id = ?1",
+            [job_id],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .optional()?;
+    Ok(raw.flatten().and_then(|s| {
+        DateTime::parse_from_rfc3339(&s)
+            .ok()
+            .map(|dt| dt.with_timezone(&Utc))
+    }))
+}
+
 // ─── run history reads ───────────────────────────────────────────────────────
 
 /// A `runs` row as surfaced by `jobs history`. `attempts` is the count of
@@ -645,6 +664,25 @@ mod tests {
             finish_attempt(&conn, "ghost", "success", Some(0), None, None, now).is_err(),
             "finish_attempt on missing attempt must error"
         );
+    }
+
+    #[test]
+    fn last_success_at_reads_recorded_success_time() {
+        use chrono::TimeZone;
+        let (_d, conn) = temp_db();
+        conn.execute(
+            "insert into jobs_state (job_id, state, config_hash, schedule_kind, updated_at)
+             values ('j', 'active', 'h', 'minute', '2026-06-20T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        assert!(
+            last_success_at(&conn, "j").unwrap().is_none(),
+            "no success recorded yet"
+        );
+        let t = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+        update_job_outcome(&conn, "j", "r1", true, t).unwrap();
+        assert_eq!(last_success_at(&conn, "j").unwrap(), Some(t));
     }
 
     fn table_names(conn: &Connection) -> Vec<String> {
