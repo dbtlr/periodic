@@ -66,8 +66,10 @@ enum AttemptResult {
     Cancelled,
 }
 
-/// Execute `job` once (single attempt — the retry loop wraps this in Task 8),
-/// recording run/attempt/event rows and tee-ing output to the terminal + JSONL.
+/// Run a job for the **manual** CLI path: create a fresh `manual` run row, then
+/// execute it. The daemon's scheduled path instead calls [`state::create_run`]
+/// itself (with the `scheduled` trigger + occurrence_key for dedupe) and then
+/// [`execute_run`] on that row, so each scheduled fire is a single correct row.
 pub(crate) fn run_job(
     conn: &rusqlite::Connection,
     logs_dir: &Path,
@@ -78,14 +80,30 @@ pub(crate) fn run_job(
     let job_id = job.id.as_deref().unwrap_or("");
     let run_id = format!("{job_id}-{}", now.timestamp_micros());
     let config_hash = crate::config::job_config_hash(job);
-
     state::create_run(conn, &run_id, job_id, &config_hash, "manual", None, now)?;
-    state::mark_run_running(conn, &run_id, now)?;
+    execute_run(conn, logs_dir, job, &run_id, now, cancel)
+}
+
+/// Execute an already-created run row (`run_id`): mark it running, run attempts
+/// with retry/timeout/cancellation, tee output to the terminal + JSONL, and
+/// finalize. The caller owns run-row creation — and thus the trigger_type and
+/// occurrence_key dedupe — so this serves both the manual CLI path and the
+/// daemon's scheduled dispatch without creating a duplicate row.
+pub(crate) fn execute_run(
+    conn: &rusqlite::Connection,
+    logs_dir: &Path,
+    job: &EffectiveJob,
+    run_id: &str,
+    now: DateTime<Utc>,
+    cancel: &AtomicBool,
+) -> Result<RunOutcome> {
+    let job_id = job.id.as_deref().unwrap_or("");
+    state::mark_run_running(conn, run_id, now)?;
     events::emit(
         conn,
         EventKind::RunStarted,
         job_id,
-        &run_id,
+        run_id,
         None,
         "run started",
         now,
@@ -100,7 +118,7 @@ pub(crate) fn run_job(
             conn,
             job,
             job_id,
-            &run_id,
+            run_id,
             &attempt_id,
             attempt_number,
             &writer,
@@ -123,9 +141,9 @@ pub(crate) fn run_job(
     };
 
     let run_finished = Utc::now();
-    finalize(conn, job_id, &run_id, status, exit_code, run_finished)?;
+    finalize(conn, job_id, run_id, status, exit_code, run_finished)?;
     Ok(RunOutcome {
-        id: run_id,
+        id: run_id.to_owned(),
         job_id: job_id.to_owned(),
         status,
         started_at: now.to_rfc3339(),

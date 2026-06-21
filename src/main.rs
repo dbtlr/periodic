@@ -42,7 +42,7 @@ fn dispatch(cli: cli::Cli) -> anyhow::Result<ExitCode> {
         Command::SelfUpdate(args) => {
             self_update::run(args.next, args.tag).map(|()| ExitCode::SUCCESS)
         }
-        Command::Daemon(_) => unimplemented("daemon"),
+        Command::Daemon(cmd) => daemon::run(cmd),
         Command::Jobs(cmd) => run_jobs(cmd),
         Command::Logs(args) => run_logs(&args),
         Command::Reload => unimplemented("reload"),
