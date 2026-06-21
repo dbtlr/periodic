@@ -77,23 +77,31 @@ pub(crate) fn run_job(
 
     let writer = Arc::new(Mutex::new(DailyLogWriter::new(logs_dir.to_path_buf())));
 
-    let attempt_id = format!("{run_id}-1");
-    let result = run_attempt(conn, job, job_id, &run_id, &attempt_id, 1, &writer, now)?;
-
-    let run_finished = Utc::now();
-
-    let (status, exit_code) = match result {
-        AttemptResult::Exited(0) => (RunStatus::Success, Some(0)),
-        AttemptResult::Exited(c) => (RunStatus::Failed, Some(c)),
-        AttemptResult::Timeout => (RunStatus::Timeout, None),
-        AttemptResult::Cancelled => (RunStatus::Cancelled, None),
+    let mut attempt_number: i64 = 1;
+    let (status, exit_code, attempts) = loop {
+        let attempt_id = format!("{run_id}-{attempt_number}");
+        let result = run_attempt(conn, job, job_id, &run_id, &attempt_id, attempt_number, &writer, now)?;
+        match result {
+            AttemptResult::Exited(0) => break (RunStatus::Success, Some(0), attempt_number as u32),
+            AttemptResult::Exited(c) => {
+                // Retry only normal non-zero exits, up to max_retries (immediate, no backoff).
+                if (attempt_number as u32) <= job.max_retries {
+                    attempt_number += 1;
+                    continue;
+                }
+                break (RunStatus::Failed, Some(c), attempt_number as u32);
+            }
+            AttemptResult::Timeout => break (RunStatus::Timeout, None, attempt_number as u32), // terminal
+            AttemptResult::Cancelled => break (RunStatus::Cancelled, None, attempt_number as u32), // terminal
+        }
     };
 
+    let run_finished = Utc::now();
     finalize(conn, job_id, &run_id, status, exit_code, now, run_finished)?;
     Ok(RunOutcome {
         id: run_id, job_id: job_id.to_owned(), status,
         started_at: now.to_rfc3339(), finished_at: run_finished.to_rfc3339(),
-        exit_code, attempts: 1,
+        exit_code, attempts,
     })
 }
 
@@ -348,5 +356,44 @@ mod tests {
         let attempt_status: String = conn.query_row(
             "select status from run_attempts where run_id=?1", [&out.id], |r| r.get(0)).unwrap();
         assert_eq!(attempt_status, "failed");
+    }
+
+    fn job_to(id: &str, command: &str, args: &[&str], timeout_secs: Option<u64>, retries: u32) -> EffectiveJob {
+        let mut j = job(id, command, args);
+        j.timeout_secs = timeout_secs;
+        j.max_retries = retries;
+        j
+    }
+
+    #[test]
+    fn timeout_terminates_and_marks_timeout() {
+        let (dir, conn) = fixture();
+        seed(&conn, "slow");
+        let out = run_job(&conn, &dir.path().join("logs"),
+            &job_to("slow", "sleep", &["30"], Some(1), 0), now()).unwrap();
+        assert!(matches!(out.status, RunStatus::Timeout), "got {:?}", out.status);
+    }
+
+    #[test]
+    fn retries_on_failure_then_records_attempts() {
+        let (dir, conn) = fixture();
+        seed(&conn, "retry");
+        let out = run_job(&conn, &dir.path().join("logs"),
+            &job_to("retry", "false", &[], None, 2), now()).unwrap();
+        assert!(matches!(out.status, RunStatus::Failed));
+        assert_eq!(out.attempts, 3);
+        let n: i64 = conn.query_row(
+            "select count(*) from run_attempts where run_id=?1", [&out.id], |r| r.get(0)).unwrap();
+        assert_eq!(n, 3);
+    }
+
+    #[test]
+    fn timeout_is_not_retried() {
+        let (dir, conn) = fixture();
+        seed(&conn, "slow2");
+        let out = run_job(&conn, &dir.path().join("logs"),
+            &job_to("slow2", "sleep", &["30"], Some(1), 3), now()).unwrap();
+        assert!(matches!(out.status, RunStatus::Timeout));
+        assert_eq!(out.attempts, 1, "timeout is terminal, not retried");
     }
 }
