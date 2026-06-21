@@ -7,6 +7,12 @@ is pre-1.0, minor versions (`0.x`) may carry breaking changes.
 
 ## [Unreleased]
 
+### Changed
+
+- `periodic doctor` now also reports daemon liveness — `not running`, `running
+  (pid N)`, `stopped`, or `not responding (stale heartbeat; possible crash)` — and
+  exits non-zero when a daemon that claims to be running has a stale heartbeat.
+
 ### Fixed
 
 - `periodic logs <id>` now exits `1` with `error: no such job` when the job is not
