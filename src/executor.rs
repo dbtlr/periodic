@@ -79,7 +79,7 @@ pub(crate) fn run_job(
     let run_id = format!("{job_id}-{}", now.timestamp_micros());
     let config_hash = crate::config::job_config_hash(job);
 
-    state::create_run(conn, &run_id, job_id, &config_hash, "manual", now)?;
+    state::create_run(conn, &run_id, job_id, &config_hash, "manual", None, now)?;
     state::mark_run_running(conn, &run_id, now)?;
     events::emit(
         conn,
