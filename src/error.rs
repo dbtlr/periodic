@@ -19,6 +19,7 @@ pub(crate) enum Error {
     Sqlite(#[from] rusqlite::Error),
 
     #[error("log I/O error: {0}")]
+    #[allow(dead_code)]
     Io(std::io::Error),
 }
 
