@@ -8,6 +8,15 @@ use thiserror::Error;
 pub(crate) enum Error {
     #[error("failed to initialize logging: {0}")]
     Logging(String),
+
+    #[error("failed to prepare state directory {path}: {source}")]
+    StateDir {
+        path: String,
+        source: std::io::Error,
+    },
+
+    #[error("state database error: {0}")]
+    Sqlite(#[from] rusqlite::Error),
 }
 
 pub(crate) type Result<T> = std::result::Result<T, Error>;
