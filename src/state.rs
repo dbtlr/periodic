@@ -901,6 +901,26 @@ mod run_writer_tests {
         finish_attempt(&conn, "a2", "success", Some(0), None, None, at(1004)).unwrap();
         let n: i64 = conn.query_row("select count(*) from run_attempts where run_id='r1'", [], |r| r.get(0)).unwrap();
         assert_eq!(n, 2);
+
+        // Verify a1 column values
+        let (status, num, exit, finished): (String, i64, Option<i64>, Option<String>) = conn.query_row(
+            "select status, attempt_number, exit_code, finished_at from run_attempts where id='a1'",
+            [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        ).unwrap();
+        assert_eq!(status, "failed");
+        assert_eq!(num, 1);
+        assert_eq!(exit, Some(1));
+        assert!(finished.is_some());
+
+        // Verify a2 column values
+        let (status, num, exit, finished): (String, i64, Option<i64>, Option<String>) = conn.query_row(
+            "select status, attempt_number, exit_code, finished_at from run_attempts where id='a2'",
+            [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        ).unwrap();
+        assert_eq!(status, "success");
+        assert_eq!(num, 2);
+        assert_eq!(exit, Some(0));
+        assert!(finished.is_some());
     }
 
     #[test]
@@ -936,5 +956,15 @@ mod run_writer_tests {
         seed_job(&conn);
         assert!(job_exists(&conn, "cleanup").unwrap());
         assert!(!job_exists(&conn, "ghost").unwrap());
+    }
+
+    #[test]
+    fn start_attempt_pid_updates_pid_on_started_attempt() {
+        let (_d, conn) = temp_db();
+        create_run(&conn, "r1", "cleanup", "h", "manual", at(1000)).unwrap();
+        start_attempt(&conn, "a1", "r1", 1, None, at(1001)).unwrap();
+        start_attempt_pid(&conn, "a1", 4242).unwrap();
+        let pid: Option<i64> = conn.query_row("select pid from run_attempts where id='a1'", [], |r| r.get(0)).unwrap();
+        assert_eq!(pid, Some(4242));
     }
 }
