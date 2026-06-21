@@ -3,8 +3,10 @@
 
 use std::path::{Path, PathBuf};
 
+use chrono::{DateTime, Utc};
 use rusqlite::Connection;
 
+use crate::config::{EffectiveConfig, NormalizedSchedule};
 use crate::error::{Error, Result};
 
 /// Ordered schema migrations. Each entry is applied once, in order; the array
@@ -151,6 +153,66 @@ fn migrate(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+// ─── jobs_state projection ───────────────────────────────────────────────────
+
+/// Project the effective config into `jobs_state`: one row per job, carrying the
+/// current `state`, `config_hash`, `schedule_kind`, and computed `next_run_at`.
+///
+/// This is a *projection*, not a history write — it upserts only the
+/// config-derived columns and deliberately preserves the run-outcome columns
+/// (`last_run_id`, `last_success_at`, `last_failure_at`, `consecutive_failures`,
+/// `validation_error`) owned by the executor (0.5) and daemon (0.6). Jobs
+/// without an id are skipped. Returns the number of rows projected.
+#[allow(dead_code)] // consumed by the list/status read-surface command (PDC-49)
+pub(crate) fn reconcile(
+    conn: &Connection,
+    config: &EffectiveConfig,
+    now: DateTime<Utc>,
+) -> Result<usize> {
+    let updated_at = now.to_rfc3339();
+    let mut count = 0;
+    for job in &config.jobs {
+        let Some(job_id) = job.id.as_deref() else {
+            continue; // unkeyed jobs can't be projected (validation flags these)
+        };
+        let state = if job.enabled { "active" } else { "disabled" };
+        let config_hash = crate::config::job_config_hash(job);
+        let kind = schedule_kind(&job.schedule);
+        let next_run_at: Option<String> = if job.enabled {
+            let tz = crate::scheduler::resolve_timezone(job.timezone.as_deref());
+            crate::scheduler::next_occurrence(job_id, &job.schedule, tz, now.with_timezone(&tz))
+                .map(|occ| occ.scheduled_for.to_rfc3339())
+        } else {
+            None
+        };
+        conn.execute(
+            "insert into jobs_state
+                 (job_id, state, config_hash, schedule_kind, next_run_at, updated_at)
+             values (?1, ?2, ?3, ?4, ?5, ?6)
+             on conflict(job_id) do update set
+                 state = excluded.state,
+                 config_hash = excluded.config_hash,
+                 schedule_kind = excluded.schedule_kind,
+                 next_run_at = excluded.next_run_at,
+                 updated_at = excluded.updated_at",
+            rusqlite::params![job_id, state, config_hash, kind, next_run_at, updated_at],
+        )?;
+        count += 1;
+    }
+    Ok(count)
+}
+
+/// The stable `schedule_kind` tag persisted for a normalized schedule, matching
+/// the kind segment of `occurrence_key`.
+fn schedule_kind(schedule: &NormalizedSchedule) -> &'static str {
+    match schedule {
+        NormalizedSchedule::MinuteAligned { .. } => "minute",
+        NormalizedSchedule::HourAligned { .. } => "hour",
+        NormalizedSchedule::Calendar { .. } => "calendar",
+        NormalizedSchedule::Cron { .. } => "cron",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -294,5 +356,178 @@ mod tests {
             remaining, 0,
             "attempts should cascade-delete with their run"
         );
+    }
+}
+
+#[cfg(test)]
+mod reconcile_tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    fn temp_db() -> (tempfile::TempDir, Connection) {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = open(&dir.path().join("periodic.db")).unwrap();
+        (dir, conn)
+    }
+
+    fn config(yaml: &str) -> EffectiveConfig {
+        crate::config::normalize(&crate::config::parse(yaml).unwrap())
+    }
+
+    fn now() -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 6, 20, 9, 0, 0).unwrap()
+    }
+
+    #[test]
+    fn inserts_one_row_per_job() {
+        let (_dir, conn) = temp_db();
+        let cfg = config(
+            "version: 1\njobs:\n  - id: a\n    schedule: { every: 15m }\n    execution: { command: x }\n  - id: b\n    schedule: { every: day, at: \"09:00\" }\n    execution: { command: y }\n",
+        );
+        let n = reconcile(&conn, &cfg, now()).unwrap();
+        assert_eq!(n, 2);
+        let count: i64 = conn
+            .query_row("select count(*) from jobs_state", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn computes_future_next_run_for_enabled_job() {
+        let (_dir, conn) = temp_db();
+        let cfg = config(
+            "version: 1\njobs:\n  - id: a\n    schedule: { every: 15m }\n    execution: { command: x }\n",
+        );
+        reconcile(&conn, &cfg, now()).unwrap();
+        let next: Option<String> = conn
+            .query_row(
+                "select next_run_at from jobs_state where job_id = 'a'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let next = next.expect("enabled job should have a next_run_at");
+        let parsed = DateTime::parse_from_rfc3339(&next).unwrap();
+        assert!(parsed > now(), "next_run_at {next} should be after now");
+    }
+
+    #[test]
+    fn disabled_job_is_disabled_with_no_next_run() {
+        let (_dir, conn) = temp_db();
+        let cfg = config(
+            "version: 1\njobs:\n  - id: a\n    enabled: false\n    schedule: { every: 15m }\n    execution: { command: x }\n",
+        );
+        reconcile(&conn, &cfg, now()).unwrap();
+        let (state, next): (String, Option<String>) = conn
+            .query_row(
+                "select state, next_run_at from jobs_state where job_id = 'a'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(state, "disabled");
+        assert!(next.is_none(), "disabled job must not have a next_run_at");
+    }
+
+    #[test]
+    fn stores_config_hash_and_schedule_kind() {
+        let (_dir, conn) = temp_db();
+        let cfg = config(
+            "version: 1\njobs:\n  - id: a\n    schedule: { every: 15m }\n    execution: { command: x }\n",
+        );
+        reconcile(&conn, &cfg, now()).unwrap();
+        let (hash, kind): (String, String) = conn
+            .query_row(
+                "select config_hash, schedule_kind from jobs_state where job_id = 'a'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(kind, "minute");
+        assert_eq!(hash, crate::config::job_config_hash(&cfg.jobs[0]));
+    }
+
+    #[test]
+    fn is_idempotent_across_reruns() {
+        let (_dir, conn) = temp_db();
+        let cfg = config(
+            "version: 1\njobs:\n  - id: a\n    schedule: { every: 15m }\n    execution: { command: x }\n",
+        );
+        reconcile(&conn, &cfg, now()).unwrap();
+        reconcile(&conn, &cfg, now()).unwrap();
+        let count: i64 = conn
+            .query_row("select count(*) from jobs_state", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn preserves_run_outcome_columns_on_rerun() {
+        let (_dir, conn) = temp_db();
+        let cfg = config(
+            "version: 1\njobs:\n  - id: a\n    schedule: { every: 15m }\n    execution: { command: x }\n",
+        );
+        reconcile(&conn, &cfg, now()).unwrap();
+        // Simulate the executor having written run outcomes onto the projection.
+        conn.execute(
+            "update jobs_state set consecutive_failures = 5, last_success_at = '2026-06-19T00:00:00Z' where job_id = 'a'",
+            [],
+        )
+        .unwrap();
+        reconcile(&conn, &cfg, now()).unwrap();
+        let (failures, success): (i64, Option<String>) = conn
+            .query_row(
+                "select consecutive_failures, last_success_at from jobs_state where job_id = 'a'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(failures, 5, "reconcile must not reset run-outcome columns");
+        assert_eq!(success.as_deref(), Some("2026-06-19T00:00:00Z"));
+    }
+
+    #[test]
+    fn updates_projection_when_config_changes() {
+        let (_dir, conn) = temp_db();
+        let before = config(
+            "version: 1\njobs:\n  - id: a\n    schedule: { every: 15m }\n    execution: { command: x }\n",
+        );
+        reconcile(&conn, &before, now()).unwrap();
+        let h1: String = conn
+            .query_row(
+                "select config_hash from jobs_state where job_id = 'a'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let after = config(
+            "version: 1\njobs:\n  - id: a\n    schedule: { every: 30m }\n    execution: { command: x }\n",
+        );
+        reconcile(&conn, &after, now()).unwrap();
+        let h2: String = conn
+            .query_row(
+                "select config_hash from jobs_state where job_id = 'a'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_ne!(
+            h1, h2,
+            "config_hash should change when the schedule changes"
+        );
+    }
+
+    #[test]
+    fn skips_jobs_without_an_id() {
+        let (_dir, conn) = temp_db();
+        let cfg = config(
+            "version: 1\njobs:\n  - schedule: { every: 15m }\n    execution: { command: x }\n",
+        );
+        let n = reconcile(&conn, &cfg, now()).unwrap();
+        assert_eq!(n, 0);
+        let count: i64 = conn
+            .query_row("select count(*) from jobs_state", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
     }
 }
