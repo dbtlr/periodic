@@ -39,7 +39,9 @@ fn periodic(env: &Env, args: &[&str]) -> assert_cmd::assert::Assert {
 
 /// Poll `daemon status --format json` until its stdout satisfies `pred`, or panic.
 fn wait_for_status(env: &Env, pred: impl Fn(&str) -> bool) -> String {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    // Generous margin: graceful shutdown passes through a transient `stopping`
+    // state and may drain in-flight runs before reaching `stopped`.
+    let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         let out = Command::cargo_bin("periodic")
             .unwrap()
@@ -88,8 +90,10 @@ fn start_detached_then_status_then_stop() {
         .success()
         .stdout(predicates::str::contains("signalled to stop"));
 
-    let stopped = wait_for_status(&env, |s| s.contains("\"running\": false"));
-    assert!(stopped.contains("\"state\": \"stopped\""), "got {stopped}");
+    // Wait for the terminal `stopped` state specifically — `running: false` alone
+    // also matches the transient `stopping` state during graceful shutdown.
+    let stopped = wait_for_status(&env, |s| s.contains("\"state\": \"stopped\""));
+    assert!(stopped.contains("\"running\": false"), "got {stopped}");
 
     // Stop is idempotent once the daemon is down.
     periodic(&env, &["daemon", "stop"])
