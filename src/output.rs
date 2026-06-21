@@ -139,7 +139,6 @@ fn col_width(cells: impl Iterator<Item = usize>, header: &str) -> usize {
 // ─── run summary / history / logs ───────────────────────────────────────────
 
 #[derive(Serialize)]
-#[allow(dead_code)]
 struct RunSummary<'a> {
     id: &'a str,
     job_id: &'a str,
@@ -152,25 +151,21 @@ struct RunSummary<'a> {
 }
 
 #[derive(Serialize)]
-#[allow(dead_code)]
 struct RunReport<'a> {
     run: RunSummary<'a>,
 }
 
 #[derive(Serialize)]
-#[allow(dead_code)]
 struct RunsReport<'a> {
     runs: &'a [RunRow],
 }
 
 #[derive(Serialize)]
-#[allow(dead_code)]
 struct LogsReport<'a> {
     lines: &'a [LogRecord],
 }
 
 /// `jobs run --format json`: `{ "run": { … } }`.
-#[allow(dead_code)]
 pub(crate) fn render_run_json(out: &RunOutcome) -> String {
     let report = RunReport {
         run: RunSummary {
@@ -188,7 +183,6 @@ pub(crate) fn render_run_json(out: &RunOutcome) -> String {
 }
 
 /// `jobs run` human one-liner. Glyph carries success/failure (NO_COLOR-safe).
-#[allow(dead_code)]
 pub(crate) fn render_run_human(out: &RunOutcome) -> String {
     let glyph = if out.status == RunStatus::Success {
         "✓"
@@ -206,13 +200,11 @@ pub(crate) fn render_run_human(out: &RunOutcome) -> String {
 }
 
 /// `jobs history --format json`: `{ "runs": [ … ] }`.
-#[allow(dead_code)]
 pub(crate) fn render_runs_json(runs: &[RunRow]) -> String {
     serde_json::to_string_pretty(&RunsReport { runs }).expect("runs report serializes")
 }
 
 /// `jobs history` human table.
-#[allow(dead_code)]
 pub(crate) fn render_runs_human(runs: &[RunRow]) -> String {
     if runs.is_empty() {
         return "no runs yet\n".to_owned();
@@ -234,13 +226,11 @@ pub(crate) fn render_runs_human(runs: &[RunRow]) -> String {
 }
 
 /// `logs --format json`: `{ "lines": [ … raw LogRecords … ] }`.
-#[allow(dead_code)]
 pub(crate) fn render_logs_json(lines: &[LogRecord]) -> String {
     serde_json::to_string_pretty(&LogsReport { lines }).expect("logs report serializes")
 }
 
 /// `logs` human render: one line per record, stderr marked with `!`.
-#[allow(dead_code)]
 pub(crate) fn render_logs_human(lines: &[LogRecord]) -> String {
     if lines.is_empty() {
         return "no output\n".to_owned();

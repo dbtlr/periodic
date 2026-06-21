@@ -114,6 +114,12 @@ pub(crate) fn default_db_path() -> PathBuf {
     home.join(".local/state/periodic/periodic.db")
 }
 
+/// Default on-disk location of per-day run output logs.
+pub(crate) fn default_logs_dir() -> PathBuf {
+    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+    home.join(".local/state/periodic/logs")
+}
+
 /// Open (creating if absent) the state database at `path`, applying connection
 /// pragmas and running any pending migrations. The parent directory is created
 /// if it does not yet exist.
@@ -319,7 +325,6 @@ pub(crate) fn update_job_outcome(
 }
 
 /// Whether a job id is present in `jobs_state` (used by `jobs run`/`history`).
-#[allow(dead_code)]
 pub(crate) fn job_exists(conn: &Connection, job_id: &str) -> Result<bool> {
     let n: i64 = conn.query_row(
         "select count(*) from jobs_state where job_id=?1", [job_id], |r| r.get(0))?;
@@ -331,7 +336,6 @@ pub(crate) fn job_exists(conn: &Connection, job_id: &str) -> Result<bool> {
 /// A `runs` row as surfaced by `jobs history`. `attempts` is the count of
 /// `run_attempts` for the run. Serializes to the frozen JSON run shape (0002).
 #[derive(Debug, Serialize, PartialEq)]
-#[allow(dead_code)]
 pub(crate) struct RunRow {
     pub(crate) id: String,
     pub(crate) status: String,
@@ -343,7 +347,6 @@ pub(crate) struct RunRow {
 }
 
 /// Runs for a job, most recent first (by `created_at`), capped at `limit`.
-#[allow(dead_code)]
 pub(crate) fn list_runs(conn: &Connection, job_id: &str, limit: i64) -> Result<Vec<RunRow>> {
     let mut stmt = conn.prepare(
         "select r.id, r.status, r.trigger_type, r.started_at, r.finished_at, r.exit_code,

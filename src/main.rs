@@ -44,7 +44,7 @@ fn dispatch(cli: cli::Cli) -> anyhow::Result<ExitCode> {
         }
         Command::Daemon(_) => unimplemented("daemon"),
         Command::Jobs(cmd) => run_jobs(cmd),
-        Command::Logs => unimplemented("logs"),
+        Command::Logs(args) => run_logs(&args),
         Command::Reload => unimplemented("reload"),
         Command::Doctor => doctor::run(),
         Command::Completion => unimplemented("completion"),
@@ -93,12 +93,12 @@ fn run_jobs(cmd: cli::JobsCommand) -> anyhow::Result<ExitCode> {
         JobsCommand::List(args) => run_jobs_list(&args),
         JobsCommand::Status(args) => run_jobs_status(&args),
         JobsCommand::Add => unimplemented("jobs add"),
-        JobsCommand::Run => unimplemented("jobs run"),
+        JobsCommand::Run(args) => run_jobs_run(&args),
         JobsCommand::Pause => unimplemented("jobs pause"),
         JobsCommand::Resume => unimplemented("jobs resume"),
         JobsCommand::Remove => unimplemented("jobs remove"),
         JobsCommand::Edit => unimplemented("jobs edit"),
-        JobsCommand::History => unimplemented("jobs history"),
+        JobsCommand::History(args) => run_jobs_history(&args),
     }
 }
 
@@ -155,6 +155,83 @@ fn run_jobs_status(args: &cli::JobsStatusArgs) -> anyhow::Result<ExitCode> {
         }
     }
 }
+
+/// `periodic jobs run <id>`: load+validate config, then execute the job in the
+/// foreground. Exit 0 success · 1 run failed/timeout/cancelled · 2 usage/invalid.
+fn run_jobs_run(args: &cli::JobsRunArgs) -> anyhow::Result<ExitCode> {
+    install_sigint_forwarder();
+    let path = cli::default_config_path();
+    let yaml = std::fs::read_to_string(&path)
+        .map_err(|e| anyhow::anyhow!("cannot read {}: {e}", path.display()))?;
+    let raw = config::parse(&yaml)
+        .map_err(|d| anyhow::anyhow!("config invalid: {} ({})", d.message, d.path))?;
+    // Invalid config → usage error (exit 2), no run row (spec §4).
+    if validation::validate_config(&raw).iter().any(|d| d.is_error()) {
+        eprintln!("error: config invalid; run `periodic validate` for details");
+        return Ok(ExitCode::from(2));
+    }
+    let effective = config::normalize(&raw);
+    let Some(job) = effective.jobs.iter().find(|j| j.id.as_deref() == Some(args.id.as_str())) else {
+        eprintln!("error: no such job: {}", args.id);
+        return Ok(ExitCode::from(2));
+    };
+    let conn = state::open(&state::default_db_path())?;
+    state::reconcile(&conn, &effective, chrono::Utc::now())?;
+    // Disabled jobs run on explicit manual trigger (spec §4) — no gating here.
+    let outcome = executor::run_job(&conn, &state::default_logs_dir(), job, chrono::Utc::now())?;
+    let rendered = match args.format {
+        cli::OutputFormat::Json => output::render_run_json(&outcome),
+        cli::OutputFormat::Human => output::render_run_human(&outcome),
+    };
+    print!("{rendered}");
+    Ok(match outcome.status {
+        executor::RunStatus::Success => ExitCode::SUCCESS,
+        _ => ExitCode::from(1),
+    })
+}
+
+/// `periodic jobs history <id>`: list recorded runs (exit 1 if job unknown).
+fn run_jobs_history(args: &cli::JobsHistoryArgs) -> anyhow::Result<ExitCode> {
+    let conn = project_state()?;
+    if !state::job_exists(&conn, &args.id)? {
+        eprintln!("error: no such job: {}", args.id);
+        return Ok(ExitCode::from(1));
+    }
+    let runs = state::list_runs(&conn, &args.id, args.limit)?;
+    let rendered = match args.format {
+        cli::OutputFormat::Json => output::render_runs_json(&runs),
+        cli::OutputFormat::Human => output::render_runs_human(&runs),
+    };
+    print!("{rendered}");
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `periodic logs <id>`: render captured output from the daily JSONL files.
+fn run_logs(args: &cli::LogsArgs) -> anyhow::Result<ExitCode> {
+    let lines = logs::read_logs(&state::default_logs_dir(), &args.id, args.run.as_deref())?;
+    let rendered = match args.format {
+        cli::OutputFormat::Json => output::render_logs_json(&lines),
+        cli::OutputFormat::Human => output::render_logs_human(&lines),
+    };
+    print!("{rendered}");
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Forward terminal SIGINT to the executor: set CANCEL so the run's wait loop
+/// kills the child's process group instead of orphaning it.
+#[cfg(unix)]
+fn install_sigint_forwarder() {
+    use nix::sys::signal::{sigaction, SaFlags, SigAction, SigHandler, SigSet, Signal};
+    extern "C" fn handle(_sig: i32) {
+        executor::CANCEL.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+    let action = SigAction::new(SigHandler::Handler(handle), SaFlags::empty(), SigSet::empty());
+    // SAFETY: the handler only stores to an AtomicBool (async-signal-safe).
+    unsafe { let _ = sigaction(Signal::SIGINT, &action); }
+}
+
+#[cfg(not(unix))]
+fn install_sigint_forwarder() {}
 
 fn unimplemented(name: &str) -> anyhow::Result<ExitCode> {
     anyhow::bail!("`periodic {name}` is not implemented yet")

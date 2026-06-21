@@ -56,7 +56,6 @@ impl DailyLogWriter {
 /// Read all `LogRecord`s under `dir`, filtered by `job_id` and optionally `run_id`,
 /// in file (chronological day) then line order. Ignores non-`.jsonl` entries and
 /// unparseable lines. A missing dir reads as empty.
-#[allow(dead_code)]
 pub(crate) fn read_logs(dir: &Path, job_id: &str, run_id: Option<&str>) -> Result<Vec<LogRecord>> {
     let mut files: Vec<PathBuf> = match fs::read_dir(dir) {
         Ok(rd) => rd.filter_map(|e| e.ok().map(|e| e.path()))
