@@ -98,8 +98,8 @@ fn run_jobs(cmd: cli::JobsCommand) -> anyhow::Result<ExitCode> {
         JobsCommand::Status(args) => run_jobs_status(&args),
         JobsCommand::Add => unimplemented("jobs add"),
         JobsCommand::Run(args) => run_jobs_run(&args),
-        JobsCommand::Pause => unimplemented("jobs pause"),
-        JobsCommand::Resume => unimplemented("jobs resume"),
+        JobsCommand::Pause(args) => run_jobs_set_enabled(&args, false),
+        JobsCommand::Resume(args) => run_jobs_set_enabled(&args, true),
         JobsCommand::Remove => unimplemented("jobs remove"),
         JobsCommand::Edit => unimplemented("jobs edit"),
         JobsCommand::History(args) => run_jobs_history(&args),
@@ -303,8 +303,10 @@ fn run_reload() -> anyhow::Result<ExitCode> {
 /// directly to disk when the daemon is stopped, or over IPC — the daemon owns
 /// the write and reloads — when it is running. The `jobs` mutation commands
 /// (PDC-82–85) wire onto this single dispatch.
-#[allow(dead_code)] // consumed by the jobs mutation commands (PDC-82–85)
-fn dispatch_mutation(mutation: &config_mutation::Mutation) -> anyhow::Result<ExitCode> {
+fn dispatch_mutation(
+    mutation: &config_mutation::Mutation,
+) -> anyhow::Result<config_mutation::Outcome> {
+    use config_mutation::Outcome;
     let conn = state::open(&state::default_db_path())?;
     let running = matches!(
         state::read_daemon_status(&conn)?,
@@ -323,15 +325,48 @@ fn dispatch_mutation(mutation: &config_mutation::Mutation) -> anyhow::Result<Exi
             .call(&req)
             .map_err(|e| anyhow::anyhow!("mutation request failed: {e}"))?
         {
-            ipc::Response::Ok { .. } => Ok(ExitCode::SUCCESS),
-            ipc::Response::Err { error, .. } => {
-                eprintln!("error: {}", error.message);
-                Ok(ExitCode::from(1))
-            }
+            ipc::Response::Ok { .. } => Ok(Outcome::Applied),
+            ipc::Response::Err { error, .. } => Ok(Outcome::Refused(error.message)),
         }
     } else {
-        config_mutation::apply_to_disk(&cli::default_config_path(), mutation)?;
-        Ok(ExitCode::SUCCESS)
+        match config_mutation::apply_to_disk(&cli::default_config_path(), mutation) {
+            Ok(()) => Ok(Outcome::Applied),
+            Err(e) => Ok(Outcome::Refused(e.to_string())),
+        }
+    }
+}
+
+/// `periodic jobs pause|resume <id>`: flip a job's `enabled` flag through the
+/// dual-mode dispatch and report the result.
+fn run_jobs_set_enabled(args: &cli::JobMutateArgs, enable: bool) -> anyhow::Result<ExitCode> {
+    let mutation = if enable {
+        config_mutation::Mutation::Resume(args.id.clone())
+    } else {
+        config_mutation::Mutation::Pause(args.id.clone())
+    };
+    match dispatch_mutation(&mutation)? {
+        config_mutation::Outcome::Applied => {
+            let (verb, state) = if enable {
+                ("Resumed", "active")
+            } else {
+                ("Paused", "paused")
+            };
+            match args.format {
+                cli::OutputFormat::Json => println!(
+                    "{}",
+                    serde_json::to_string_pretty(
+                        &serde_json::json!({ "id": args.id, "state": state })
+                    )
+                    .expect("mutation result serializes")
+                ),
+                cli::OutputFormat::Human => println!("{verb}: {}", args.id),
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        config_mutation::Outcome::Refused(msg) => {
+            eprintln!("error: {msg}");
+            Ok(ExitCode::from(1))
+        }
     }
 }
 

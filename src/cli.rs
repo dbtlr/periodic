@@ -129,9 +129,9 @@ pub(crate) enum JobsCommand {
     /// Run a job now.
     Run(JobsRunArgs),
     /// Pause a job.
-    Pause,
+    Pause(JobMutateArgs),
     /// Resume a paused job.
-    Resume,
+    Resume(JobMutateArgs),
     /// Remove a job.
     Remove,
     /// Edit a job.
@@ -143,6 +143,16 @@ pub(crate) enum JobsCommand {
 /// Arguments for `periodic jobs list`.
 #[derive(Debug, Args)]
 pub(crate) struct JobsListArgs {
+    /// Output format.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+    pub(crate) format: OutputFormat,
+}
+
+/// Arguments for `periodic jobs pause|resume <id>`.
+#[derive(Debug, Args)]
+pub(crate) struct JobMutateArgs {
+    /// Job id to pause or resume.
+    pub(crate) id: String,
     /// Output format.
     #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
     pub(crate) format: OutputFormat,
