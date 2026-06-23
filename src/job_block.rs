@@ -14,12 +14,13 @@ pub(crate) fn derive_id(args: &JobsAddArgs) -> Option<String> {
     if let Some(id) = &args.id {
         return Some(id.clone());
     }
-    let derived = args
-        .title
-        .as_deref()
-        .map(kebab)
-        .or_else(|| args.command.as_deref().map(|c| kebab(basename(c))));
-    derived.filter(|s| !s.is_empty())
+    let from_title = args.title.as_deref().map(kebab).filter(|s| !s.is_empty());
+    from_title.or_else(|| {
+        args.command
+            .as_deref()
+            .map(|c| kebab(basename(c)))
+            .filter(|s| !s.is_empty())
+    })
 }
 
 /// The last path segment of a command, ignoring any arguments after a space.
@@ -85,7 +86,10 @@ fn every_value(s: &str) -> String {
 /// user set are emitted; the result is one list item indented two spaces.
 pub(crate) fn build_block(id: &str, args: &JobsAddArgs) -> String {
     let mut b = String::new();
-    b.push_str(&format!("  - id: {id}\n"));
+    // Defense in depth: the caller already validates the id is kebab-case (which
+    // never needs quoting), but quote it anyway so a raw id can never inject YAML
+    // structure (e.g. a newline smuggling extra keys/jobs).
+    b.push_str(&format!("  - id: {}\n", scalar(id)));
     if let Some(t) = &args.title {
         b.push_str(&format!("    title: {}\n", scalar(t)));
     }
