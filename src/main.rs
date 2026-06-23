@@ -1,5 +1,6 @@
 mod cli;
 mod config;
+mod config_edit;
 mod daemon;
 mod diagnostics;
 mod doctor;
