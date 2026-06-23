@@ -1338,6 +1338,7 @@ dependencies = [
  "clap_complete",
  "clap_mangen",
  "croner",
+ "granit-parser",
  "iana-time-zone",
  "nix",
  "predicates",
