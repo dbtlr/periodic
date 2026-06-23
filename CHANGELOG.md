@@ -18,6 +18,12 @@ is pre-1.0, minor versions (`0.x`) may carry breaking changes.
   and the schedule reloads live; when it is stopped the CLI writes the file
   directly. `--format json` reports `{ "id", "state" }`. An unknown job id exits `1`
   without touching the file.
+- `periodic jobs remove <id>` — delete a job from the config. The job's block is
+  excised surgically (siblings, comments, and formatting preserved), validated, and
+  written atomically; the same dual-mode applies (live IPC reload when the daemon
+  runs, direct write when stopped). Invoking the command is the confirmation — there
+  is no interactive prompt. Run history is unaffected. `--format json` reports
+  `{ "id", "removed": true }`; an unknown job id exits `1` without touching the file.
 
 ## v0.6.0 - 2026-06-21
 

@@ -133,7 +133,7 @@ pub(crate) enum JobsCommand {
     /// Resume a paused job.
     Resume(JobMutateArgs),
     /// Remove a job.
-    Remove,
+    Remove(JobMutateArgs),
     /// Edit a job.
     Edit,
     /// Show a job's run history.
