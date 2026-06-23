@@ -1,6 +1,7 @@
 mod cli;
 mod config;
 mod config_edit;
+mod config_mutation;
 mod daemon;
 mod diagnostics;
 mod doctor;
@@ -295,6 +296,42 @@ fn run_reload() -> anyhow::Result<ExitCode> {
             eprintln!("error: daemon refused reload: {}", error.message);
             Ok(ExitCode::from(1))
         }
+    }
+}
+
+/// Apply a config mutation in the right ownership mode (config-mutation-model):
+/// directly to disk when the daemon is stopped, or over IPC — the daemon owns
+/// the write and reloads — when it is running. The `jobs` mutation commands
+/// (PDC-82–85) wire onto this single dispatch.
+#[allow(dead_code)] // consumed by the jobs mutation commands (PDC-82–85)
+fn dispatch_mutation(mutation: &config_mutation::Mutation) -> anyhow::Result<ExitCode> {
+    let conn = state::open(&state::default_db_path())?;
+    let running = matches!(
+        state::read_daemon_status(&conn)?,
+        Some(s) if s.state == "running"
+    );
+    if running {
+        let (method, params) = config_mutation::mutation_to_request(mutation);
+        let mut client = ipc::Client::connect(&ipc::socket_path())
+            .map_err(|e| anyhow::anyhow!("cannot reach daemon (it may have crashed): {e}"))?;
+        let req = ipc::Request {
+            id: method.to_owned(),
+            method: method.to_owned(),
+            params,
+        };
+        match client
+            .call(&req)
+            .map_err(|e| anyhow::anyhow!("mutation request failed: {e}"))?
+        {
+            ipc::Response::Ok { .. } => Ok(ExitCode::SUCCESS),
+            ipc::Response::Err { error, .. } => {
+                eprintln!("error: {}", error.message);
+                Ok(ExitCode::from(1))
+            }
+        }
+    } else {
+        config_mutation::apply_to_disk(&cli::default_config_path(), mutation)?;
+        Ok(ExitCode::SUCCESS)
     }
 }
 
