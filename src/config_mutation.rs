@@ -13,6 +13,14 @@ use std::path::Path;
 
 use crate::{config, config_edit, validation};
 
+/// The user-facing result of a dispatched mutation. `Refused` carries a message
+/// for an expected failure (unknown job, invalid result) — distinct from a
+/// transport error, which propagates as `Err` from the dispatcher.
+pub(crate) enum Outcome {
+    Applied,
+    Refused(String),
+}
+
 /// A requested change to the desired-state YAML.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Mutation {

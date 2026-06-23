@@ -7,6 +7,18 @@ is pre-1.0, minor versions (`0.x`) may carry breaking changes.
 
 ## [Unreleased]
 
+### Added
+
+- `periodic jobs pause <id>` / `periodic jobs resume <id>` — disable or re-enable a
+  job by toggling its `enabled` flag in the config. Edits are **surgical**: the
+  job's `enabled:` line is flipped (or inserted) in place, leaving every comment,
+  key order, and formatting in the rest of the file untouched. The change is
+  validated before it is written and applied atomically, so an invalid result never
+  replaces a good config. When the daemon is running the change is applied over IPC
+  and the schedule reloads live; when it is stopped the CLI writes the file
+  directly. `--format json` reports `{ "id", "state" }`. An unknown job id exits `1`
+  without touching the file.
+
 ## v0.6.0 - 2026-06-21
 
 The `0.6` increment — the daemon. periodic now runs as a long-lived scheduler: a

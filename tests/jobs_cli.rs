@@ -63,6 +63,59 @@ fn jobs_status_unknown_job_exits_one() {
     periodic(&home, &["jobs", "status", "ghost"]).code(1);
 }
 
+fn read_config(home: &tempfile::TempDir) -> String {
+    fs::read_to_string(home.path().join(".config/periodic/periodic.config.yaml")).unwrap()
+}
+
+#[test]
+fn jobs_pause_disables_on_disk() {
+    let home = setup(CONFIG);
+    periodic(&home, &["jobs", "pause", "cleanup"])
+        .success()
+        .stdout(predicates::str::contains("Paused"))
+        .stdout(predicates::str::contains("cleanup"));
+    assert!(
+        read_config(&home).contains("enabled: false"),
+        "cleanup should be paused on disk:\n{}",
+        read_config(&home)
+    );
+}
+
+#[test]
+fn jobs_resume_enables_on_disk() {
+    let home = setup(CONFIG);
+    // `report` ships with enabled: false.
+    periodic(&home, &["jobs", "resume", "report"])
+        .success()
+        .stdout(predicates::str::contains("Resumed"))
+        .stdout(predicates::str::contains("report"));
+    let cfg = read_config(&home);
+    assert!(
+        cfg.contains("enabled: true"),
+        "report should be resumed:\n{cfg}"
+    );
+    assert!(
+        !cfg.contains("enabled: false"),
+        "no job should remain disabled:\n{cfg}"
+    );
+}
+
+#[test]
+fn jobs_pause_unknown_job_exits_one_without_writing() {
+    let home = setup(CONFIG);
+    periodic(&home, &["jobs", "pause", "ghost"]).code(1);
+    assert_eq!(read_config(&home), CONFIG, "config must be untouched");
+}
+
+#[test]
+fn jobs_pause_json_reports_state() {
+    let home = setup(CONFIG);
+    periodic(&home, &["jobs", "pause", "cleanup", "--format", "json"])
+        .success()
+        .stdout(predicates::str::contains("\"id\": \"cleanup\""))
+        .stdout(predicates::str::contains("\"state\": \"paused\""));
+}
+
 #[test]
 fn jobs_list_with_invalid_config_fails() {
     let home = setup(
