@@ -515,7 +515,9 @@ fn load_validated_config() -> anyhow::Result<config::EffectiveConfig> {
 // ─── IPC handler ───────────────────────────────────────────────────────────────
 
 /// Answer one IPC request. `daemon.status` returns a liveness snapshot;
-/// `daemon.reload` queues a reload on the control channel. Unknown methods error.
+/// `daemon.reload` queues a reload; the config-mutation methods
+/// (`jobs.pause`/`resume`/`remove`/`add`, `config.replace`) apply the change to
+/// disk (daemon owns the write) and queue a reload. Unknown methods error.
 fn ipc_handler(
     req: crate::ipc::Request,
     control_tx: &Sender<ControlEvent>,
@@ -528,6 +530,16 @@ fn ipc_handler(
             Ok(()) => Response::ok(req.id, json!({ "reloading": true })),
             Err(_) => Response::err(req.id, "shutting_down", "daemon is shutting down"),
         },
+        m if crate::config_mutation::is_mutation_method(m) => {
+            let path = crate::cli::default_config_path();
+            match crate::config_mutation::handle_ipc(m, &req.params, &path) {
+                Ok(()) => match control_tx.send(ControlEvent::Reload) {
+                    Ok(()) => Response::ok(req.id, json!({ "applied": true })),
+                    Err(_) => Response::err(req.id, "shutting_down", "daemon is shutting down"),
+                },
+                Err((code, message)) => Response::err(req.id, code, message),
+            }
+        }
         other => Response::err(req.id, "unknown_method", format!("unknown method: {other}")),
     }
 }
