@@ -117,6 +117,37 @@ fn jobs_pause_json_reports_state() {
 }
 
 #[test]
+fn jobs_remove_deletes_job_and_keeps_siblings() {
+    let home = setup(CONFIG);
+    periodic(&home, &["jobs", "remove", "cleanup"])
+        .success()
+        .stdout(predicates::str::contains("Removed"))
+        .stdout(predicates::str::contains("cleanup"));
+    let cfg = read_config(&home);
+    assert!(
+        !cfg.contains("id: cleanup"),
+        "cleanup should be gone:\n{cfg}"
+    );
+    assert!(cfg.contains("id: report"), "report should remain:\n{cfg}");
+}
+
+#[test]
+fn jobs_remove_unknown_job_exits_one_without_writing() {
+    let home = setup(CONFIG);
+    periodic(&home, &["jobs", "remove", "ghost"]).code(1);
+    assert_eq!(read_config(&home), CONFIG, "config must be untouched");
+}
+
+#[test]
+fn jobs_remove_json_reports_removed() {
+    let home = setup(CONFIG);
+    periodic(&home, &["jobs", "remove", "cleanup", "--format", "json"])
+        .success()
+        .stdout(predicates::str::contains("\"id\": \"cleanup\""))
+        .stdout(predicates::str::contains("\"removed\": true"));
+}
+
+#[test]
 fn jobs_list_with_invalid_config_fails() {
     let home = setup(
         "version: 1\njobs:\n  - id: bad\n    schedule: { every: 45m }\n    execution: { command: x }\n",

@@ -100,7 +100,7 @@ fn run_jobs(cmd: cli::JobsCommand) -> anyhow::Result<ExitCode> {
         JobsCommand::Run(args) => run_jobs_run(&args),
         JobsCommand::Pause(args) => run_jobs_set_enabled(&args, false),
         JobsCommand::Resume(args) => run_jobs_set_enabled(&args, true),
-        JobsCommand::Remove => unimplemented("jobs remove"),
+        JobsCommand::Remove(args) => run_jobs_remove(&args),
         JobsCommand::Edit => unimplemented("jobs edit"),
         JobsCommand::History(args) => run_jobs_history(&args),
     }
@@ -360,6 +360,31 @@ fn run_jobs_set_enabled(args: &cli::JobMutateArgs, enable: bool) -> anyhow::Resu
                     .expect("mutation result serializes")
                 ),
                 cli::OutputFormat::Human => println!("{verb}: {}", args.id),
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        config_mutation::Outcome::Refused(msg) => {
+            eprintln!("error: {msg}");
+            Ok(ExitCode::from(1))
+        }
+    }
+}
+
+/// `periodic jobs remove <id>`: delete a job's block from the config through the
+/// dual-mode dispatch. Invoking the command is the confirmation (no prompt); the
+/// edit is surgical, validated, and atomic. Run history is unaffected.
+fn run_jobs_remove(args: &cli::JobMutateArgs) -> anyhow::Result<ExitCode> {
+    match dispatch_mutation(&config_mutation::Mutation::Remove(args.id.clone()))? {
+        config_mutation::Outcome::Applied => {
+            match args.format {
+                cli::OutputFormat::Json => println!(
+                    "{}",
+                    serde_json::to_string_pretty(
+                        &serde_json::json!({ "id": args.id, "removed": true })
+                    )
+                    .expect("mutation result serializes")
+                ),
+                cli::OutputFormat::Human => println!("Removed: {}", args.id),
             }
             Ok(ExitCode::SUCCESS)
         }
