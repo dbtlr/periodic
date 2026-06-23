@@ -276,20 +276,35 @@ fn last_job_item(events: &[(Event, Span)], seq: usize) -> Option<usize> {
 /// Byte span of a job list item including its `- ` line prefix and trailing
 /// newline, so removing the range leaves clean lines around the gap.
 fn job_item_line_span(source: &str, events: &[(Event, Span)], item: usize) -> Option<Range<usize>> {
-    let end_idx = end_of_node(events, item);
     let content_start = events[item].1.byte_range()?.start;
-    // End markers (MappingEnd/SequenceEnd) can carry the position of the *next*
-    // token, so exclude them — measure the block by its actual content events.
-    let content_end = (item..end_idx)
-        .filter(|&j| !matches!(events[j].0, Event::MappingEnd | Event::SequenceEnd))
-        .filter_map(|j| events[j].1.byte_range())
-        .map(|r| r.end)
-        .max()?;
     let line_start = source[..content_start].rfind('\n').map_or(0, |n| n + 1);
-    let after = source[content_end..]
-        .find('\n')
-        .map_or(source.len(), |n| content_end + n + 1);
-    Some(line_start..after)
+
+    // End of removal. A block scalar's span can over-reach past its trailing newline
+    // into the *next* line's indentation, so we don't trust this job's own span end
+    // for non-last jobs: cut at the next sibling item's line start, independent of
+    // any span quirk. The last job has no next sibling, so trim its (possibly
+    // over-reaching) content end back to its final content line.
+    let after_node = end_of_node(events, item);
+    let next = skip_comments(events, after_node);
+    let end = if let Some((Event::MappingStart(..), span)) = events.get(next) {
+        let next_start = span.byte_range()?.start;
+        source[..next_start].rfind('\n').map_or(0, |n| n + 1)
+    } else {
+        let content_end = (item..after_node)
+            .filter(|&j| !matches!(events[j].0, Event::MappingEnd | Event::SequenceEnd))
+            .filter_map(|j| events[j].1.byte_range())
+            .map(|r| r.end)
+            .max()?;
+        let trimmed = source[..content_end].trim_end_matches([' ', '\t']);
+        if trimmed.ends_with('\n') {
+            trimmed.len()
+        } else {
+            source[content_end..]
+                .find('\n')
+                .map_or(source.len(), |n| content_end + n + 1)
+        }
+    };
+    Some(line_start..end)
 }
 
 #[cfg(test)]
@@ -415,6 +430,65 @@ jobs:
         assert!(
             err.to_string().contains("nope"),
             "error should name the job: {err}"
+        );
+    }
+
+    #[test]
+    fn remove_job_with_trailing_block_scalar_keeps_next_sibling() {
+        // A block scalar (`|`) as the job's last field reports its end at column 0
+        // of the next line; the line-extension must not swallow the next sibling.
+        let src = "\
+version: 1
+jobs:
+  - id: tricky
+    schedule:
+      every: 1h
+    execution:
+      command: |
+        echo hello
+        echo done
+  - id: keepme
+    schedule:
+      every: 6h
+    execution:
+      command: /bin/true
+";
+        let out = remove_job(src, "tricky").expect("remove should succeed");
+        assert!(!out.contains("id: tricky"), "tricky should be gone:\n{out}");
+        assert!(
+            out.contains("- id: keepme"),
+            "keepme header must survive:\n{out}"
+        );
+        assert!(
+            out.contains("command: /bin/true"),
+            "keepme body must survive:\n{out}"
+        );
+    }
+
+    #[test]
+    fn remove_last_job_with_block_scalar_keeps_prior_sibling() {
+        let src = "\
+version: 1
+jobs:
+  - id: keep
+    schedule:
+      every: 1h
+    execution:
+      command: /bin/true
+  - id: last
+    schedule:
+      every: 6h
+    execution:
+      command: |
+        echo hi
+        echo bye
+";
+        let out = remove_job(src, "last").expect("remove should succeed");
+        assert!(!out.contains("id: last"), "last job gone:\n{out}");
+        assert!(out.contains("- id: keep"), "prior sibling kept:\n{out}");
+        assert!(
+            out.contains("command: /bin/true"),
+            "prior body kept:\n{out}"
         );
     }
 
