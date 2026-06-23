@@ -118,10 +118,14 @@ pub(crate) enum DaemonCommand {
 }
 
 /// `periodic jobs …`
+// `Add` carries the wide Hybrid-C flag surface, so it dwarfs the other variants.
+// clap's derive can't parse a boxed variant (`Box<JobsAddArgs>`), and this enum is
+// parsed exactly once per invocation, so the size difference is immaterial.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Subcommand)]
 pub(crate) enum JobsCommand {
     /// Add a job.
-    Add,
+    Add(JobsAddArgs),
     /// List jobs.
     List(JobsListArgs),
     /// Show one job's status.
@@ -143,6 +147,57 @@ pub(crate) enum JobsCommand {
 /// Arguments for `periodic jobs list`.
 #[derive(Debug, Args)]
 pub(crate) struct JobsListArgs {
+    /// Output format.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+    pub(crate) format: OutputFormat,
+}
+
+/// Arguments for `periodic jobs add` (Hybrid-C flag surface). Schedule semantics
+/// beyond `--every` vs `--cron` are enforced by validation, not here.
+#[derive(Debug, Args)]
+pub(crate) struct JobsAddArgs {
+    /// Schedule shorthand: `15m`, `6h`, `day`, `weekday`, `friday`,
+    /// `monday,wednesday,friday`, `month`. Mutually exclusive with `--cron`.
+    #[arg(long, value_name = "EVERY")]
+    pub(crate) every: Option<String>,
+    /// Wall-clock time for a calendar schedule, e.g. `09:00`.
+    #[arg(long, value_name = "HH:MM")]
+    pub(crate) at: Option<String>,
+    /// Day of month for a monthly schedule (1–31).
+    #[arg(long, value_name = "DAY")]
+    pub(crate) on_day: Option<i64>,
+    /// Last day of the month (monthly schedule).
+    #[arg(long)]
+    pub(crate) last_day: bool,
+    /// Cron expression (the escape hatch). Mutually exclusive with the `--every` family.
+    #[arg(long, value_name = "EXPR", conflicts_with_all = ["every", "at", "on_day", "last_day"])]
+    pub(crate) cron: Option<String>,
+
+    /// Command to execute.
+    #[arg(long, value_name = "CMD")]
+    pub(crate) command: Option<String>,
+    /// Working directory for the command.
+    #[arg(long, value_name = "DIR")]
+    pub(crate) cwd: Option<String>,
+    /// Per-run timeout, e.g. `30s`, `5m`.
+    #[arg(long, value_name = "DUR")]
+    pub(crate) timeout: Option<String>,
+    /// Overlap policy: `skip` (v1 default).
+    #[arg(long, value_name = "POLICY")]
+    pub(crate) overlap: Option<String>,
+    /// Number of retries on failure.
+    #[arg(long, value_name = "N")]
+    pub(crate) retry: Option<i64>,
+    /// Explicit job id (otherwise derived from `--title` or the command).
+    #[arg(long, value_name = "ID")]
+    pub(crate) id: Option<String>,
+    /// Human-friendly title.
+    #[arg(long, value_name = "TITLE")]
+    pub(crate) title: Option<String>,
+    /// Create the job paused (`enabled: false`).
+    #[arg(long)]
+    pub(crate) disabled: bool,
+
     /// Output format.
     #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
     pub(crate) format: OutputFormat,

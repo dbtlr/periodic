@@ -9,6 +9,7 @@ mod error;
 mod events;
 mod executor;
 mod ipc;
+mod job_block;
 mod logs;
 mod output;
 mod scheduler;
@@ -96,7 +97,7 @@ fn run_jobs(cmd: cli::JobsCommand) -> anyhow::Result<ExitCode> {
     match cmd {
         JobsCommand::List(args) => run_jobs_list(&args),
         JobsCommand::Status(args) => run_jobs_status(&args),
-        JobsCommand::Add => unimplemented("jobs add"),
+        JobsCommand::Add(args) => run_jobs_add(&args),
         JobsCommand::Run(args) => run_jobs_run(&args),
         JobsCommand::Pause(args) => run_jobs_set_enabled(&args, false),
         JobsCommand::Resume(args) => run_jobs_set_enabled(&args, true),
@@ -364,6 +365,46 @@ fn run_jobs_set_enabled(args: &cli::JobMutateArgs, enable: bool) -> anyhow::Resu
                     .expect("mutation result serializes")
                 ),
                 cli::OutputFormat::Human => println!("{verb}: {}", args.id),
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        config_mutation::Outcome::Refused(msg) => {
+            eprintln!("error: {msg}");
+            Ok(ExitCode::from(1))
+        }
+    }
+}
+
+/// `periodic jobs add …`: generate a job block from flags and append it through
+/// the dual-mode dispatch. Flag-driven only — scaffolding into `$EDITOR` lands
+/// with `jobs edit` (PDC-85). The generated block is validated before it is
+/// persisted, so an invalid schedule is refused without touching the file.
+fn run_jobs_add(args: &cli::JobsAddArgs) -> anyhow::Result<ExitCode> {
+    if args.command.is_none() {
+        eprintln!(
+            "error: --command is required (scaffolding into $EDITOR is not yet available; use `jobs edit`)"
+        );
+        return Ok(ExitCode::from(1));
+    }
+    if args.every.is_none() && args.cron.is_none() {
+        eprintln!("error: a schedule is required: pass --every (e.g. 15m, day) or --cron");
+        return Ok(ExitCode::from(1));
+    }
+    let Some(id) = job_block::derive_id(args) else {
+        eprintln!("error: could not derive a job id from --title or --command; pass --id");
+        return Ok(ExitCode::from(1));
+    };
+
+    let block = job_block::build_block(&id, args);
+    match dispatch_mutation(&config_mutation::Mutation::Add(block))? {
+        config_mutation::Outcome::Applied => {
+            match args.format {
+                cli::OutputFormat::Json => println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({ "id": id, "added": true }))
+                        .expect("mutation result serializes")
+                ),
+                cli::OutputFormat::Human => println!("Added: {id}"),
             }
             Ok(ExitCode::SUCCESS)
         }
