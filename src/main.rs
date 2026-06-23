@@ -331,7 +331,9 @@ fn dispatch_mutation(
     } else {
         match config_mutation::apply_to_disk(&cli::default_config_path(), mutation) {
             Ok(()) => Ok(Outcome::Applied),
-            Err(e) => Ok(Outcome::Refused(e.to_string())),
+            // Domain refusal → exit 1; an I/O/system failure → exit 2 (propagate).
+            Err(config_mutation::ApplyError::Refused(msg)) => Ok(Outcome::Refused(msg)),
+            Err(config_mutation::ApplyError::System(e)) => Err(e),
         }
     }
 }
@@ -346,10 +348,12 @@ fn run_jobs_set_enabled(args: &cli::JobMutateArgs, enable: bool) -> anyhow::Resu
     };
     match dispatch_mutation(&mutation)? {
         config_mutation::Outcome::Applied => {
+            // `state` uses the frozen active/disabled vocabulary (decision 0002),
+            // matching `jobs list`/`status` so the field means the same everywhere.
             let (verb, state) = if enable {
                 ("Resumed", "active")
             } else {
-                ("Paused", "paused")
+                ("Paused", "disabled")
             };
             match args.format {
                 cli::OutputFormat::Json => println!(

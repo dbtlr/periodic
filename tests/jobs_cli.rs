@@ -113,7 +113,8 @@ fn jobs_pause_json_reports_state() {
     periodic(&home, &["jobs", "pause", "cleanup", "--format", "json"])
         .success()
         .stdout(predicates::str::contains("\"id\": \"cleanup\""))
-        .stdout(predicates::str::contains("\"state\": \"paused\""));
+        // Frozen vocabulary (decision 0002): paused == "disabled", same as list/status.
+        .stdout(predicates::str::contains("\"state\": \"disabled\""));
 }
 
 #[test]
@@ -136,6 +137,19 @@ fn jobs_remove_unknown_job_exits_one_without_writing() {
     let home = setup(CONFIG);
     periodic(&home, &["jobs", "remove", "ghost"]).code(1);
     assert_eq!(read_config(&home), CONFIG, "config must be untouched");
+}
+
+#[test]
+fn jobs_pause_missing_config_exits_two_not_one() {
+    // No config file at all: a system error (exit 2), distinct from a domain
+    // refusal like an unknown job (exit 1).
+    let home = tempfile::tempdir().unwrap();
+    Command::cargo_bin("periodic")
+        .unwrap()
+        .env("HOME", home.path())
+        .args(["jobs", "pause", "cleanup"])
+        .assert()
+        .code(2);
 }
 
 #[test]

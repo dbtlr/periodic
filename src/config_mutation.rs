@@ -21,6 +21,25 @@ pub(crate) enum Outcome {
     Refused(String),
 }
 
+/// An error from applying a mutation to disk. `Refused` is an expected, domain
+/// failure (unknown job, invalid result, unsupported layout) → exit `1`; `System`
+/// is an I/O / environment failure (unreadable or unwritable config) → exit `2`,
+/// matching the project's convention (`validate`/`jobs run` exit `2` on those).
+#[derive(Debug)]
+pub(crate) enum ApplyError {
+    Refused(String),
+    System(anyhow::Error),
+}
+
+impl std::fmt::Display for ApplyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ApplyError::Refused(m) => f.write_str(m),
+            ApplyError::System(e) => write!(f, "{e:#}"),
+        }
+    }
+}
+
 /// A requested change to the desired-state YAML.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Mutation {
@@ -39,10 +58,10 @@ pub(crate) enum Mutation {
 /// Apply `mutation` to the config at `path`: read, surgically edit, validate,
 /// and atomically persist. On any error (unknown job, invalid result) the file
 /// is left untouched.
-pub(crate) fn apply_to_disk(path: &Path, mutation: &Mutation) -> anyhow::Result<()> {
+pub(crate) fn apply_to_disk(path: &Path, mutation: &Mutation) -> Result<(), ApplyError> {
     let candidate = render(path, mutation)?;
-    validate(&candidate)?;
-    config_edit::atomic_write(path, &candidate)
+    validate(&candidate).map_err(|e| ApplyError::Refused(e.to_string()))?;
+    config_edit::atomic_write(path, &candidate).map_err(ApplyError::System)
 }
 
 /// The frozen IPC method + params for a mutation (CLI → daemon, daemon running).
@@ -99,21 +118,27 @@ pub(crate) fn handle_ipc(
 ) -> Result<(), (String, String)> {
     let mutation = request_to_mutation(method, params)
         .map_err(|e| ("bad_params".to_owned(), e.to_string()))?;
-    apply_to_disk(config_path, &mutation).map_err(|e| ("mutation_failed".to_owned(), e.to_string()))
+    apply_to_disk(config_path, &mutation).map_err(|e| match e {
+        ApplyError::Refused(m) => ("mutation_failed".to_owned(), m),
+        ApplyError::System(err) => ("io_error".to_owned(), err.to_string()),
+    })
 }
 
 /// Produce the candidate YAML for `mutation` without persisting it. Surgical
 /// mutations read and edit the current file; `Replace` carries its own content.
-fn render(path: &Path, mutation: &Mutation) -> anyhow::Result<String> {
-    let read_current = || -> anyhow::Result<String> {
+fn render(path: &Path, mutation: &Mutation) -> Result<String, ApplyError> {
+    let read_current = || -> Result<String, ApplyError> {
         std::fs::read_to_string(path)
-            .map_err(|e| anyhow::anyhow!("cannot read {}: {e}", path.display()))
+            .map_err(|e| ApplyError::System(anyhow::anyhow!("cannot read {}: {e}", path.display())))
     };
+    // A failed surgical edit is a domain refusal (unknown job, unsupported layout);
+    // a failed read is a System error (propagated above by `?`).
+    let refuse = |r: anyhow::Result<String>| r.map_err(|e| ApplyError::Refused(e.to_string()));
     match mutation {
-        Mutation::Pause(id) => config_edit::set_enabled(&read_current()?, id, false),
-        Mutation::Resume(id) => config_edit::set_enabled(&read_current()?, id, true),
-        Mutation::Remove(id) => config_edit::remove_job(&read_current()?, id),
-        Mutation::Add(block) => config_edit::append_job(&read_current()?, block),
+        Mutation::Pause(id) => refuse(config_edit::set_enabled(&read_current()?, id, false)),
+        Mutation::Resume(id) => refuse(config_edit::set_enabled(&read_current()?, id, true)),
+        Mutation::Remove(id) => refuse(config_edit::remove_job(&read_current()?, id)),
+        Mutation::Add(block) => refuse(config_edit::append_job(&read_current()?, block)),
         Mutation::Replace(content) => Ok(content.clone()),
     }
 }
@@ -232,6 +257,25 @@ jobs:
             CONFIG,
             "file untouched"
         );
+    }
+
+    #[test]
+    fn unreadable_config_is_a_system_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("does-not-exist.yaml");
+        match apply_to_disk(&missing, &Mutation::Pause("x".to_owned())) {
+            Err(ApplyError::System(_)) => {}
+            other => panic!("a missing config must be a System error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn domain_failure_is_a_refusal_not_a_system_error() {
+        let (_dir, path) = temp_config(CONFIG);
+        match apply_to_disk(&path, &Mutation::Remove("ghost".to_owned())) {
+            Err(ApplyError::Refused(_)) => {}
+            other => panic!("an unknown job must be a Refused error, got {other:?}"),
+        }
     }
 
     #[test]
