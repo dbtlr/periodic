@@ -9,6 +9,18 @@ is pre-1.0, minor versions (`0.x`) may carry breaking changes.
 
 ### Added
 
+- `periodic jobs add` — create a job from flags. The schedule comes from
+  `--every <15m|6h|day|weekday|friday|monday,wednesday|month>` (with `--at`,
+  `--on-day`, `--last-day`) or the `--cron` escape hatch (the two are mutually
+  exclusive); the command and options from `--command`, `--cwd`, `--timeout`,
+  `--overlap`, `--retry`, `--title`, `--disabled`. The job id is `--id`, else a
+  kebab-case slug of `--title`, else the command's basename. A generated block is
+  appended to `jobs:` surgically (the rest of the file is untouched), then
+  validated before it is written, so an invalid schedule or a colliding id is
+  refused (exit `1`) without changing the config. `--format json` reports
+  `{ "id", "added": true }`. Adding the first job to an empty config is not yet
+  supported — use `jobs edit`.
+
 - `periodic jobs pause <id>` / `periodic jobs resume <id>` — disable or re-enable a
   job by toggling its `enabled` flag in the config. Edits are **surgical**: the
   job's `enabled:` line is flipped (or inserted) in place, leaving every comment,

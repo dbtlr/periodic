@@ -162,6 +162,199 @@ fn jobs_remove_json_reports_removed() {
 }
 
 #[test]
+fn jobs_add_appends_a_valid_job_preserving_existing() {
+    let home = setup(CONFIG);
+    periodic(
+        &home,
+        &[
+            "jobs",
+            "add",
+            "--id",
+            "backup",
+            "--every",
+            "6h",
+            "--command",
+            "/usr/bin/backup",
+        ],
+    )
+    .success()
+    .stdout(predicates::str::contains("Added"))
+    .stdout(predicates::str::contains("backup"));
+    let cfg = read_config(&home);
+    assert!(cfg.contains("id: backup"), "new job present:\n{cfg}");
+    assert!(cfg.contains("/usr/bin/backup"));
+    assert!(
+        cfg.contains("id: cleanup") && cfg.contains("id: report"),
+        "existing kept:\n{cfg}"
+    );
+    // The result is valid: list parses and sees three jobs.
+    periodic(&home, &["jobs", "list"])
+        .success()
+        .stdout(predicates::str::contains("3 job(s)"));
+}
+
+#[test]
+fn jobs_add_derives_kebab_id_from_command_basename() {
+    let home = setup(CONFIG);
+    periodic(
+        &home,
+        &[
+            "jobs",
+            "add",
+            "--every",
+            "6h",
+            "--command",
+            "/usr/local/bin/sync",
+        ],
+    )
+    .success();
+    assert!(
+        read_config(&home).contains("id: sync"),
+        "{}",
+        read_config(&home)
+    );
+}
+
+#[test]
+fn jobs_add_cron_and_calendar_schedules() {
+    let home = setup(CONFIG);
+    periodic(
+        &home,
+        &[
+            "jobs",
+            "add",
+            "--id",
+            "nightly",
+            "--cron",
+            "0 3 * * *",
+            "--command",
+            "x",
+        ],
+    )
+    .success();
+    periodic(
+        &home,
+        &[
+            "jobs",
+            "add",
+            "--id",
+            "morning",
+            "--every",
+            "day",
+            "--at",
+            "09:00",
+            "--command",
+            "x",
+        ],
+    )
+    .success();
+    let cfg = read_config(&home);
+    assert!(cfg.contains("cron:"), "cron job written:\n{cfg}");
+    assert!(
+        cfg.contains("at: \"09:00\""),
+        "time should be quoted:\n{cfg}"
+    );
+}
+
+#[test]
+fn jobs_add_duplicate_id_is_refused_without_writing() {
+    let home = setup(CONFIG);
+    periodic(
+        &home,
+        &[
+            "jobs",
+            "add",
+            "--id",
+            "cleanup",
+            "--every",
+            "6h",
+            "--command",
+            "x",
+        ],
+    )
+    .code(1);
+    assert_eq!(
+        read_config(&home).matches("id: cleanup").count(),
+        1,
+        "a colliding add must not duplicate the job"
+    );
+}
+
+#[test]
+fn jobs_add_invalid_schedule_is_refused_without_writing() {
+    let home = setup(CONFIG);
+    periodic(
+        &home,
+        &[
+            "jobs",
+            "add",
+            "--id",
+            "bad",
+            "--every",
+            "45m",
+            "--command",
+            "x",
+        ],
+    )
+    .code(1);
+    assert!(
+        !read_config(&home).contains("id: bad"),
+        "invalid job must not be written"
+    );
+}
+
+#[test]
+fn jobs_add_every_and_cron_conflict_is_a_usage_error() {
+    let home = setup(CONFIG);
+    periodic(
+        &home,
+        &[
+            "jobs",
+            "add",
+            "--id",
+            "x",
+            "--every",
+            "6h",
+            "--cron",
+            "* * * * *",
+            "--command",
+            "y",
+        ],
+    )
+    .code(2);
+}
+
+#[test]
+fn jobs_add_requires_command_and_schedule() {
+    let home = setup(CONFIG);
+    periodic(&home, &["jobs", "add", "--id", "x", "--every", "6h"]).code(1); // no command
+    periodic(&home, &["jobs", "add", "--id", "x", "--command", "y"]).code(1); // no schedule
+}
+
+#[test]
+fn jobs_add_json_reports_added() {
+    let home = setup(CONFIG);
+    periodic(
+        &home,
+        &[
+            "jobs",
+            "add",
+            "--id",
+            "backup",
+            "--every",
+            "6h",
+            "--command",
+            "x",
+            "--format",
+            "json",
+        ],
+    )
+    .success()
+    .stdout(predicates::str::contains("\"id\": \"backup\""))
+    .stdout(predicates::str::contains("\"added\": true"));
+}
+
+#[test]
 fn jobs_list_with_invalid_config_fails() {
     let home = setup(
         "version: 1\njobs:\n  - id: bad\n    schedule: { every: 45m }\n    execution: { command: x }\n",
