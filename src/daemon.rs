@@ -140,7 +140,9 @@ fn run_foreground(db_path: &std::path::Path) -> anyhow::Result<ExitCode> {
     let ipc_pid = pid;
     let ipc_handle = thread::spawn(move || {
         let path = crate::ipc::socket_path();
-        let handler = move |req: crate::ipc::Request| ipc_handler(req, &ipc_tx, ipc_pid);
+        let ipc_config = crate::cli::default_config_path();
+        let handler =
+            move |req: crate::ipc::Request| ipc_handler(req, &ipc_tx, ipc_pid, &ipc_config);
         if let Err(e) = crate::ipc::serve(&path, &ipc_stop, handler) {
             tracing::warn!(error = %e, "ipc server exited with error");
         }
@@ -522,6 +524,7 @@ fn ipc_handler(
     req: crate::ipc::Request,
     control_tx: &Sender<ControlEvent>,
     pid: i32,
+    config_path: &std::path::Path,
 ) -> crate::ipc::Response {
     use crate::ipc::Response;
     match req.method.as_str() {
@@ -531,12 +534,16 @@ fn ipc_handler(
             Err(_) => Response::err(req.id, "shutting_down", "daemon is shutting down"),
         },
         m if crate::config_mutation::is_mutation_method(m) => {
-            let path = crate::cli::default_config_path();
-            match crate::config_mutation::handle_ipc(m, &req.params, &path) {
-                Ok(()) => match control_tx.send(ControlEvent::Reload) {
-                    Ok(()) => Response::ok(req.id, json!({ "applied": true })),
-                    Err(_) => Response::err(req.id, "shutting_down", "daemon is shutting down"),
-                },
+            match crate::config_mutation::handle_ipc(m, &req.params, config_path) {
+                // The write has committed atomically. Report success even if the
+                // reload can't be queued (daemon shutting down) — the change is
+                // durable and applies on the next start. Reporting an error here
+                // would be a lie ("it failed") about a file that did change, and
+                // would invite a retry that could double-apply (e.g. jobs.add).
+                Ok(()) => {
+                    let reloading = control_tx.send(ControlEvent::Reload).is_ok();
+                    Response::ok(req.id, json!({ "applied": true, "reloading": reloading }))
+                }
                 Err((code, message)) => Response::err(req.id, code, message),
             }
         }
@@ -764,6 +771,50 @@ mod tests {
         assert!(!v.running);
         assert!(v.render_human().contains("stopped"));
         assert_eq!(v.pid, Some(9));
+    }
+
+    // ── IPC mutation handling ─────────────────────────────────────────────────
+
+    #[test]
+    fn mutation_over_ipc_reports_applied_even_when_reload_cannot_queue() {
+        use crate::ipc::{Request, Response};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("periodic.config.yaml");
+        std::fs::write(
+            &path,
+            "version: 1\njobs:\n  - id: j\n    enabled: true\n    schedule:\n      every: 15m\n    execution:\n      command: /bin/true\n",
+        )
+        .unwrap();
+
+        // Drop the receiver so the reload send fails (simulates a shutting-down daemon).
+        let (tx, rx) = mpsc::channel::<ControlEvent>();
+        drop(rx);
+
+        let req = Request {
+            id: "1".to_owned(),
+            method: "jobs.pause".to_owned(),
+            params: json!({ "id": "j" }),
+        };
+        let resp = ipc_handler(req, &tx, 1, &path);
+
+        // The atomic write committed, so the handler must report success (not an
+        // error that would invite a double-applying retry), with reloading=false.
+        match resp {
+            Response::Ok { result, .. } => {
+                assert_eq!(result["applied"], json!(true));
+                assert_eq!(result["reloading"], json!(false));
+            }
+            Response::Err { error, .. } => {
+                panic!("should report applied, got error: {}", error.message)
+            }
+        }
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("enabled: false"),
+            "the pause must be persisted to disk"
+        );
     }
 
     // ── sleep clamp ───────────────────────────────────────────────────────────
