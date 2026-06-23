@@ -394,6 +394,12 @@ fn run_jobs_add(args: &cli::JobsAddArgs) -> anyhow::Result<ExitCode> {
         eprintln!("error: could not derive a job id from --title or --command; pass --id");
         return Ok(ExitCode::from(1));
     };
+    // Reject an invalid id before generating any YAML — this both gives a clear
+    // error and closes off YAML-structure injection via a crafted --id.
+    if !validation::is_kebab(&id) {
+        eprintln!("error: invalid job id {id:?}: job ids must be kebab-case (a-z, 0-9, -)");
+        return Ok(ExitCode::from(1));
+    }
 
     let block = job_block::build_block(&id, args);
     match dispatch_mutation(&config_mutation::Mutation::Add(block))? {

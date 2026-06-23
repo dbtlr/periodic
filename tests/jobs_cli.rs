@@ -355,6 +355,92 @@ fn jobs_add_json_reports_added() {
 }
 
 #[test]
+fn jobs_add_rejects_id_yaml_injection() {
+    let home = setup(CONFIG);
+    let evil = "real\n    schedule: { every: 1h }\n    execution: { command: c }\n  - id: smuggled";
+    periodic(
+        &home,
+        &[
+            "jobs",
+            "add",
+            "--id",
+            evil,
+            "--every",
+            "6h",
+            "--command",
+            "x",
+        ],
+    )
+    .code(1);
+    let cfg = read_config(&home);
+    assert!(!cfg.contains("smuggled"), "no structure injection:\n{cfg}");
+    assert_eq!(cfg, CONFIG, "config must be untouched");
+}
+
+#[test]
+fn jobs_add_rejects_empty_and_null_id() {
+    let home = setup(CONFIG);
+    periodic(
+        &home,
+        &["jobs", "add", "--id", "", "--every", "6h", "--command", "x"],
+    )
+    .code(1);
+    periodic(
+        &home,
+        &[
+            "jobs",
+            "add",
+            "--id",
+            "~",
+            "--every",
+            "6h",
+            "--command",
+            "x",
+        ],
+    )
+    .code(1);
+    periodic(
+        &home,
+        &[
+            "jobs",
+            "add",
+            "--id",
+            "Not Kebab",
+            "--every",
+            "6h",
+            "--command",
+            "x",
+        ],
+    )
+    .code(1);
+    assert_eq!(read_config(&home), CONFIG, "config must be untouched");
+}
+
+#[test]
+fn jobs_add_empty_title_falls_back_to_command_basename() {
+    let home = setup(CONFIG);
+    periodic(
+        &home,
+        &[
+            "jobs",
+            "add",
+            "--title",
+            "",
+            "--every",
+            "6h",
+            "--command",
+            "/usr/bin/backup",
+        ],
+    )
+    .success();
+    assert!(
+        read_config(&home).contains("id: backup"),
+        "{}",
+        read_config(&home)
+    );
+}
+
+#[test]
 fn jobs_list_with_invalid_config_fails() {
     let home = setup(
         "version: 1\njobs:\n  - id: bad\n    schedule: { every: 45m }\n    execution: { command: x }\n",

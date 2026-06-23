@@ -129,7 +129,9 @@ fn check_job(idx: usize, job: &RawJob, out: &mut Vec<Diagnostic>) {
     }
 }
 
-fn is_kebab(s: &str) -> bool {
+/// Whether `s` is a valid kebab-case job id (`a-z`, `0-9`, `-`; non-empty). The
+/// canonical id-charset rule, reused by `jobs add` to reject ids before writing.
+pub(crate) fn is_kebab(s: &str) -> bool {
     !s.is_empty()
         && s.chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
