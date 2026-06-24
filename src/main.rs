@@ -10,6 +10,7 @@ mod events;
 mod executor;
 mod ipc;
 mod job_block;
+mod jobs_edit;
 mod logs;
 mod output;
 mod scheduler;
