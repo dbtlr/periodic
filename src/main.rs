@@ -494,6 +494,10 @@ fn run_jobs_edit() -> anyhow::Result<ExitCode> {
         }
         jobs_edit::EditResult::Edited(content) => {
             // Staleness guard: refuse rather than clobber a concurrent change.
+            // This closes the human-scale window (someone editing in another
+            // terminal while you sit in `$EDITOR`); a sub-millisecond TOCTOU
+            // window remains between this check and the write, which is
+            // acceptable for a single-user scheduler (no file locking).
             let disk_now = std::fs::read_to_string(&path).ok();
             if disk_now != disk_before {
                 eprintln!(
