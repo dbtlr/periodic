@@ -447,3 +447,69 @@ fn jobs_list_with_invalid_config_fails() {
     );
     periodic(&home, &["jobs", "list"]).failure();
 }
+
+fn periodic_env(
+    home: &tempfile::TempDir,
+    envs: &[(&str, &str)],
+    args: &[&str],
+) -> assert_cmd::assert::Assert {
+    let mut cmd = Command::cargo_bin("periodic").unwrap();
+    cmd.env("HOME", home.path());
+    // Clear inherited interactive editor vars so the test-supplied EDITOR wins.
+    cmd.env_remove("VISUAL");
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
+    cmd.args(args).assert()
+}
+
+/// Write an executable shell script into `home` that, when run as `$EDITOR`
+/// with the temp path as its argument, overwrites that file with `new_content`.
+fn editor_script(home: &tempfile::TempDir, new_content: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = home.path().join("fake-editor.sh");
+    // `$1` is the temp file path passed by periodic's `sh -c '<editor> "$1"'`.
+    let script = format!("#!/bin/sh\ncat > \"$1\" <<'PERIODIC_EOF'\n{new_content}PERIODIC_EOF\n");
+    fs::write(&path, script).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
+#[test]
+fn jobs_edit_no_change_is_noop() {
+    let home = setup(CONFIG);
+    periodic_env(&home, &[("EDITOR", "true")], &["jobs", "edit"])
+        .success()
+        .stdout(predicates::str::contains("No changes"));
+    assert_eq!(read_config(&home), CONFIG); // untouched
+}
+
+#[test]
+fn jobs_edit_applies_valid_change() {
+    let home = setup(CONFIG);
+    let new = "version: 1\njobs:\n  - id: only\n    schedule: { every: 1h }\n    execution: { command: z }\n";
+    let editor = editor_script(&home, new);
+    periodic_env(
+        &home,
+        &[("EDITOR", editor.to_str().unwrap())],
+        &["jobs", "edit"],
+    )
+    .success()
+    .stdout(predicates::str::contains("Config updated"));
+    assert!(read_config(&home).contains("id: only"));
+}
+
+#[test]
+fn jobs_edit_invalid_then_giveup_aborts() {
+    let home = setup(CONFIG);
+    // a job with no schedule/execution -> validation error; the static editor
+    // re-writes the same invalid content each round -> give-up on round 2.
+    let editor = editor_script(&home, "version: 1\njobs:\n  - id: broken\n");
+    periodic_env(
+        &home,
+        &[("EDITOR", editor.to_str().unwrap())],
+        &["jobs", "edit"],
+    )
+    .code(1);
+    assert_eq!(read_config(&home), CONFIG); // untouched
+}
