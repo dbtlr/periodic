@@ -513,3 +513,29 @@ fn jobs_edit_invalid_then_giveup_aborts() {
     .code(1);
     assert_eq!(read_config(&home), CONFIG); // untouched
 }
+
+#[test]
+fn jobs_edit_bootstraps_into_empty_config() {
+    // Bootstrap path: config file absent → scaffold seeded into editor → user
+    // writes a valid job → it is created at the real config path.
+    let home = tempfile::tempdir().unwrap();
+    let cfg_dir = home.path().join(".config/periodic");
+    fs::create_dir_all(&cfg_dir).unwrap();
+    // No config file written — intentionally absent.
+
+    let new_content = "version: 1\njobs:\n  - id: first\n    schedule: { every: 1h }\n    execution: { command: x }\n";
+    let editor = editor_script(&home, new_content);
+    periodic_env(
+        &home,
+        &[("EDITOR", editor.to_str().unwrap())],
+        &["jobs", "edit"],
+    )
+    .success()
+    .stdout(predicates::str::contains("Config updated"));
+
+    let cfg = read_config(&home);
+    assert!(
+        cfg.contains("id: first"),
+        "new job should be written:\n{cfg}"
+    );
+}
