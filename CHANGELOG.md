@@ -9,6 +9,11 @@ is pre-1.0, minor versions (`0.x`) may carry breaking changes.
 
 ### Added
 
+- `periodic completion <shell>` — print a shell completion script to stdout for
+  `bash`, `zsh`, `fish`, `powershell`, or `elvish` (e.g. `periodic completion zsh`).
+  The script is generated from the live command surface, so it always matches the
+  real commands and flags. An unknown or missing shell is a usage error (exit `2`).
+
 - `periodic jobs edit` — open the whole config in `$EDITOR` (`$VISUAL` → `$EDITOR`
   → `vi`) to hand-edit your desired state, then validate and apply it. On save the
   config is parsed and validated; if it has errors the editor reopens with the
