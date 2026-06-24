@@ -2,7 +2,6 @@
 //! runner so the looping, header injection/stripping, and no-change/abort logic
 //! are exhaustively unit-testable without spawning a real editor. The real
 //! `$EDITOR`-spawning runner and on-disk orchestration live in `main.rs`.
-#![allow(dead_code)] // wired up by `run_jobs_edit` in Task 2
 
 use crate::{config, validation};
 
