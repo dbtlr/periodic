@@ -103,7 +103,7 @@ fn run_jobs(cmd: cli::JobsCommand) -> anyhow::Result<ExitCode> {
         JobsCommand::Pause(args) => run_jobs_set_enabled(&args, false),
         JobsCommand::Resume(args) => run_jobs_set_enabled(&args, true),
         JobsCommand::Remove(args) => run_jobs_remove(&args),
-        JobsCommand::Edit => unimplemented("jobs edit"),
+        JobsCommand::Edit => run_jobs_edit(),
         JobsCommand::History(args) => run_jobs_history(&args),
     }
 }
@@ -446,6 +446,116 @@ fn run_jobs_remove(args: &cli::JobMutateArgs) -> anyhow::Result<ExitCode> {
         }
     }
 }
+
+/// `periodic jobs edit`: open the whole config in `$EDITOR`, validate in a loop,
+/// guard against a concurrent on-disk change, then persist via the dual-mode
+/// dispatch. Interactive-only — not part of the `--format json` contract (0002).
+fn run_jobs_edit() -> anyhow::Result<ExitCode> {
+    let path = cli::default_config_path();
+
+    // Seed the editor buffer; bootstrap a scaffold when there's no usable config.
+    // `disk_before` is the staleness baseline (None = file absent).
+    let disk_before = std::fs::read_to_string(&path).ok();
+    let seed = match &disk_before {
+        Some(s) if !s.trim().is_empty() => s.clone(),
+        _ => SCAFFOLD.to_string(),
+    };
+
+    // Temp file with a .yaml extension so editors syntax-highlight; cleaned up
+    // on drop regardless of how this function returns.
+    let tmp = tempfile::Builder::new()
+        .prefix("periodic-edit-")
+        .suffix(".yaml")
+        .tempfile()?;
+    let tmp_path = tmp.path().to_path_buf();
+
+    let result = jobs_edit::run_edit_loop(&seed, |buf| {
+        std::fs::write(&tmp_path, buf)?;
+        run_editor(&tmp_path)
+    });
+
+    let result = match result {
+        Ok(r) => r,
+        // Editor could not be launched / IO on the temp file failed -> system error.
+        Err(e) => {
+            eprintln!("error: {e}");
+            return Ok(ExitCode::from(2));
+        }
+    };
+
+    match result {
+        jobs_edit::EditResult::NoChange => {
+            println!("No changes");
+            Ok(ExitCode::SUCCESS)
+        }
+        jobs_edit::EditResult::Aborted => {
+            eprintln!("aborted; config unchanged");
+            Ok(ExitCode::from(1))
+        }
+        jobs_edit::EditResult::Edited(content) => {
+            // Staleness guard: refuse rather than clobber a concurrent change.
+            let disk_now = std::fs::read_to_string(&path).ok();
+            if disk_now != disk_before {
+                eprintln!(
+                    "error: config changed on disk since you started editing; \
+                     your edits were not applied \u{2014} re-run `jobs edit`"
+                );
+                return Ok(ExitCode::from(1));
+            }
+            match dispatch_mutation(&config_mutation::Mutation::Replace(content))? {
+                config_mutation::Outcome::Applied => {
+                    println!("Config updated");
+                    Ok(ExitCode::SUCCESS)
+                }
+                config_mutation::Outcome::Refused(msg) => {
+                    eprintln!("error: {msg}");
+                    Ok(ExitCode::from(1))
+                }
+            }
+        }
+    }
+}
+
+/// Spawn `$VISUAL`/`$EDITOR` (fallback `vi`) on `path` via `sh -c`, so editors
+/// with arguments (e.g. `code --wait`) work and the path is passed safely as
+/// `$1` (never interpolated into the command string). Returns `Ok(None)` if the
+/// editor exits non-zero (treated as an abort), `Err` if it cannot be launched.
+fn run_editor(path: &std::path::Path) -> std::io::Result<Option<String>> {
+    let editor = std::env::var("VISUAL")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| {
+            std::env::var("EDITOR")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+        })
+        .unwrap_or_else(|| "vi".to_string());
+
+    let status = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!("{editor} \"$1\""))
+        .arg("sh") // $0
+        .arg(path) // $1
+        .status()?;
+
+    if !status.success() {
+        return Ok(None);
+    }
+    Ok(Some(std::fs::read_to_string(path)?))
+}
+
+/// Starter config seeded into the editor when no usable config exists yet, so
+/// `jobs edit` is the bootstrap path (empty `jobs: []` is intentionally valid).
+const SCAFFOLD: &str = "version: 1\njobs: []\n\
+# Example \u{2014} uncomment and edit, then save:\n\
+# jobs:\n\
+#   - id: nightly-cleanup\n\
+#     enabled: true\n\
+#     schedule:\n\
+#       every: day\n\
+#       at: \"03:00\"\n\
+#     execution:\n\
+#       command: /usr/bin/true\n";
 
 /// Forward terminal SIGINT to the executor: set CANCEL so the run's wait loop
 /// kills the child's process group instead of orphaning it.
