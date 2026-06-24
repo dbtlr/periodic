@@ -53,7 +53,7 @@ fn dispatch(cli: cli::Cli) -> anyhow::Result<ExitCode> {
         Command::Logs(args) => run_logs(&args),
         Command::Reload => run_reload(),
         Command::Doctor => doctor::run(),
-        Command::Completion => unimplemented("completion"),
+        Command::Completion(args) => run_completion(args.shell),
     }
 }
 
@@ -583,8 +583,14 @@ fn install_sigint_forwarder() {
 #[cfg(not(unix))]
 fn install_sigint_forwarder() {}
 
-fn unimplemented(name: &str) -> anyhow::Result<ExitCode> {
-    anyhow::bail!("`periodic {name}` is not implemented yet")
+/// `periodic completion <shell>`: print a completion script for `shell` to
+/// stdout, generated from the live clap surface (so it always tracks the real
+/// commands and flags). The same generator backs the build-time artifacts.
+fn run_completion(shell: clap_complete::Shell) -> anyhow::Result<ExitCode> {
+    use clap::CommandFactory;
+    let mut cmd = cli::Cli::command();
+    clap_complete::generate(shell, &mut cmd, "periodic", &mut std::io::stdout());
+    Ok(ExitCode::SUCCESS)
 }
 
 /// Install the global tracing subscriber. `RUST_LOG` wins when set; otherwise

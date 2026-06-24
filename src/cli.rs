@@ -55,13 +55,20 @@ pub(crate) enum Command {
     Reload,
     /// Diagnose daemon, config, and runtime health.
     Doctor,
-    /// Generate shell completions.
-    Completion,
+    /// Generate a shell completion script.
+    Completion(CompletionArgs),
     /// Update periodic in place.
     SelfUpdate(SelfUpdateArgs),
     /// Manage the daemon under the OS service manager.
     #[command(subcommand)]
     Service(ServiceCommand),
+}
+
+/// Arguments for `periodic completion <shell>`.
+#[derive(Debug, Args)]
+pub(crate) struct CompletionArgs {
+    /// Shell to generate a completion script for.
+    pub(crate) shell: clap_complete::Shell,
 }
 
 /// `periodic service …`: register the daemon with the per-user service manager
