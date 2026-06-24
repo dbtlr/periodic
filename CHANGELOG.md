@@ -9,6 +9,18 @@ is pre-1.0, minor versions (`0.x`) may carry breaking changes.
 
 ### Added
 
+- `periodic jobs edit` — open the whole config in `$EDITOR` (`$VISUAL` → `$EDITOR`
+  → `vi`) to hand-edit your desired state, then validate and apply it. On save the
+  config is parsed and validated; if it has errors the editor reopens with the
+  errors shown as a comment header and your text preserved (save it unchanged to
+  abort). When there is no config yet, a starter scaffold is seeded — this is the
+  way to create your first job. A valid result is applied atomically through the
+  same dual-mode path as the other mutations (live IPC reload when the daemon runs,
+  direct write when stopped). If the config changed on disk while you were editing,
+  the edit is refused rather than clobbering the concurrent change. Saving with no
+  changes is a clean no-op. The command is interactive-only and is not part of the
+  `--format json` contract.
+
 - `periodic jobs add` — create a job from flags. The schedule comes from
   `--every <15m|6h|day|weekday|friday|monday,wednesday|month>` (with `--at`,
   `--on-day`, `--last-day`) or the `--cron` escape hatch (the two are mutually
