@@ -139,7 +139,7 @@ The CHANGELOG is one of three layers; each answers a different question:
 
 1. **`CHANGELOG.md` `## [Unreleased]`** — human-curated release notes; the primary surface for operators. "What shipped in this release?"
 2. **`git log` / squash commit bodies** — the implementation history with SHAs. "What's the history of this code?"
-3. **Atlas vault `Workspaces/periodic/`** — `decisions/` (ADRs), `notes/` (specs), and Saga session logs: rationale, alternatives, risks. "Why was it built this way?"
+3. **Atlas vault `Workspaces/periodic/`** — `decisions/` (ADRs), `notes/` (specs), and session logs: rationale, alternatives, risks. "Why was it built this way?"
 
 Don't duplicate effort across layers. Specs/plans are transient (reviewed, then deleted on merge) — they are not a durable layer.
 
